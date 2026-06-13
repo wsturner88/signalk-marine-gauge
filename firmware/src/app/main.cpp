@@ -382,7 +382,7 @@ static void setTank(lv_obj_t *bar, lv_obj_t *lbl, float ratio) {
 
 static void updateUI() {
   char b[40];
-  // --- wind (page 0): rim arrow uses 3s-smoothed angle ---
+  // --- wind (page 0): rim arrow uses ~1s-smoothed angle ---
   if (!isnan(boat.windAngleAppAvg)) {
     float deg = boat.windAngleAppAvg * 57.2958f;
     while (deg < 0) deg += 360; while (deg >= 360) deg -= 360;
@@ -488,11 +488,18 @@ static void applyDelta(const char *p, JsonVariantConst v) {
     static float es = NAN, ec = NAN;
     float s = sinf(boat.windAngleApp), c = cosf(boat.windAngleApp);
     if (isnan(es)) { es = s; ec = c; }
-    else { const float A = 0.13f; es = A * s + (1 - A) * es; ec = A * c + (1 - A) * ec; }
+    // A=0.4 at the ~400ms wind update rate -> ~1s smoothing (was 0.13 = ~3s).
+    else { const float A = 0.4f; es = A * s + (1 - A) * es; ec = A * c + (1 - A) * ec; }
     boat.windAngleAppAvg = atan2f(es, ec);
   }
-  else if (!strcmp(p, "environment.wind.speedApparent")) boat.windSpeedApp = v.as<float>();
-  else if (!strcmp(p, "environment.wind.speedTrue")) boat.windSpeedTrue = v.as<float>();
+  else if (!strcmp(p, "environment.wind.speedApparent")) {
+    float x = v.as<float>();  // ~1s smoothing so AWS reads steady but responsive
+    boat.windSpeedApp = isnan(boat.windSpeedApp) ? x : 0.4f * x + 0.6f * boat.windSpeedApp;
+  }
+  else if (!strcmp(p, "environment.wind.speedTrue")) {
+    float x = v.as<float>();
+    boat.windSpeedTrue = isnan(boat.windSpeedTrue) ? x : 0.4f * x + 0.6f * boat.windSpeedTrue;
+  }
   else if (!strcmp(p, "navigation.headingMagnetic")) boat.heading = v.as<float>();
   else if (!strcmp(p, "environment.depth.belowTransducer")) boat.depth = v.as<float>();
   else if (!strcmp(p, "navigation.speedThroughWater")) boat.stw = v.as<float>();
@@ -572,11 +579,18 @@ void loop() {
   // You should hear: [beep A = drive-low] ... pause ... [beep B = float]. Tell me which.
   static bool beeped = false;
   if (!beeped && millis() > 1200) { beeped = true; beepDrive(250); delay(500); beepFloat(250); }
-  // One-shot RGB scan-out resync: the GDMA can start mid-frame at boot, leaving
-  // the image circularly shifted up by ~vsync-porch lines (top wraps to bottom).
-  // Restarting the panel transmission re-aligns the DMA to line 0.
-  static bool fbResynced = false;
-  if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
+  // RGB scan-out resync. The GDMA can start mid-frame at boot AND can lose sync
+  // later under WiFi/PSRAM bursts, circularly shifting the image up (top wraps to
+  // bottom). Restarting the panel transmission re-aligns the DMA to line 0. Do it
+  // once early (clears the boot offset fast) then periodically so any later drift
+  // self-corrects within a couple seconds. Interval is tunable.
+  static uint32_t lastResync = 0;
+  static uint32_t resyncInterval = 800;   // first one fast, then settle to 3s
+  if (millis() - lastResync > resyncInterval) {
+    lastResync = millis();
+    resyncInterval = 3000;
+    esp_lcd_rgb_panel_restart(panelHandle);
+  }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); }
