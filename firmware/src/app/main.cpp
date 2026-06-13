@@ -460,8 +460,8 @@ WebSocketsClient ws;
 static void sendSubscription() {
   static const char *sub =
     "{\"context\":\"vessels.self\",\"subscribe\":["
-    "{\"path\":\"environment.wind.angleApparent\",\"period\":400},"
-    "{\"path\":\"environment.wind.speedApparent\",\"period\":400},"
+    "{\"path\":\"environment.wind.angleApparent\",\"period\":250},"
+    "{\"path\":\"environment.wind.speedApparent\",\"period\":250},"
     "{\"path\":\"environment.wind.speedTrue\",\"period\":400},"
     "{\"path\":\"navigation.headingMagnetic\",\"period\":500},"
     "{\"path\":\"environment.depth.belowTransducer\",\"period\":1000},"
@@ -492,14 +492,10 @@ static void applyDelta(const char *p, JsonVariantConst v) {
     else { const float A = 0.4f; es = A * s + (1 - A) * es; ec = A * c + (1 - A) * ec; }
     boat.windAngleAppAvg = atan2f(es, ec);
   }
-  else if (!strcmp(p, "environment.wind.speedApparent")) {
-    float x = v.as<float>();  // ~1s smoothing so AWS reads steady but responsive
-    boat.windSpeedApp = isnan(boat.windSpeedApp) ? x : 0.4f * x + 0.6f * boat.windSpeedApp;
-  }
-  else if (!strcmp(p, "environment.wind.speedTrue")) {
-    float x = v.as<float>();
-    boat.windSpeedTrue = isnan(boat.windSpeedTrue) ? x : 0.4f * x + 0.6f * boat.windSpeedTrue;
-  }
+  // Wind SPEED shown raw (no smoothing) so gusts/peaks read live, like a real
+  // wind instrument — only the direction arrow is smoothed (see angleApparent).
+  else if (!strcmp(p, "environment.wind.speedApparent")) boat.windSpeedApp = v.as<float>();
+  else if (!strcmp(p, "environment.wind.speedTrue")) boat.windSpeedTrue = v.as<float>();
   else if (!strcmp(p, "navigation.headingMagnetic")) boat.heading = v.as<float>();
   else if (!strcmp(p, "environment.depth.belowTransducer")) boat.depth = v.as<float>();
   else if (!strcmp(p, "navigation.speedThroughWater")) boat.stw = v.as<float>();
@@ -579,18 +575,11 @@ void loop() {
   // You should hear: [beep A = drive-low] ... pause ... [beep B = float]. Tell me which.
   static bool beeped = false;
   if (!beeped && millis() > 1200) { beeped = true; beepDrive(250); delay(500); beepFloat(250); }
-  // RGB scan-out resync. The GDMA can start mid-frame at boot AND can lose sync
-  // later under WiFi/PSRAM bursts, circularly shifting the image up (top wraps to
-  // bottom). Restarting the panel transmission re-aligns the DMA to line 0. Do it
-  // once early (clears the boot offset fast) then periodically so any later drift
-  // self-corrects within a couple seconds. Interval is tunable.
-  static uint32_t lastResync = 0;
-  static uint32_t resyncInterval = 800;   // first one fast, then settle to 3s
-  if (millis() - lastResync > resyncInterval) {
-    lastResync = millis();
-    resyncInterval = 3000;
-    esp_lcd_rgb_panel_restart(panelHandle);
-  }
+  // One-shot scan-out resync ~800ms after boot: the GDMA can start mid-frame on
+  // power-up, leaving a boot vertical offset. With the bounce buffer disabled the
+  // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
+  static bool fbResynced = false;
+  if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); }

@@ -11,19 +11,26 @@ Library root:
 
 ---
 
-## Patch 1 — reduce boot vertical offset (cache coherency)
+## Patch 1 — DISABLE the bounce buffer (stops the image drifting under WiFi)
 
 File: `src/databus/Arduino_ESP32RGBPanel.cpp` (in the `getFrameBuffer()` panel
-config, ~line 91).
+config, ~line 75).
 
-Change the framebuffer flag from `false` to `true`:
+Change the bounce-buffer size to `0`:
 
 ```c
-.bb_invalidate_cache = true,    // was: false
+.bounce_buffer_size_px = 0,    // was: 40 * w
 ```
 
-Why: makes the RGB DMA see fresh framebuffer pixels, reducing the boot
-vertical-offset/tearing. (Original patch from the 2026-06-13 session.)
+Why: with a bounce buffer, its refill ISR gets starved by WiFi bursts and the
+RGB pixel feed slips → the image drifts up permanently (top wraps to bottom),
+recurring every few minutes. Disabling it makes the RGB DMA read the PSRAM
+framebuffer directly (no refill ISR to starve). Octal PSRAM bandwidth far
+exceeds the scan need at 12 MHz pclk, so direct read is stable. **This is the
+real fix for the vertical-offset bug.** (2026-06-13.)
+
+Note: the nearby `.bb_invalidate_cache = true` flag (an earlier patch) is now
+moot since there's no bounce buffer, but it's harmless — leave it as-is.
 
 ---
 
