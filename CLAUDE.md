@@ -113,6 +113,18 @@ All the brief's planned paths exist on the real model. Units are **SI**, exactly
 
 ---
 
+## Distributable Build — UI, Config Backend & WiFi Provisioning (planned 2026-06-13)
+
+This is meant to be an **open-source project others flash onto their own boats** (repo `wsturner88/signalk-marine-gauge`, private until further along). That goal drives three pieces — `secrets.h` is **dev-only**; real users must never recompile.
+
+1. **Swipeable multi-page UI.** LVGL `lv_tileview`, one tile per page, swipe horizontally. Page 1 = **wind dial** (`lv_meter` needle for apparent wind angle, speed in center), Page 2 = **boat status** (battery/depth/tanks/shore power). Requires GT911 **touch** wired into an LVGL input device (the first `app` build omitted touch — added when tileview lands).
+2. **On-device config backend.** Web server on the ESP32 (candidate: `ESPAsyncWebServer` + `AsyncTCP`) serving a settings page at the gauge's LAN IP. Persist to **NVS** (`Preferences`) or LittleFS+JSON. Settings: SignalK host/port/path, per-page path selection, units, brightness, later anchor/alarm boundaries. This is the "make changes once it's live" backend + the Baileys-style WebUI.
+3. **WiFi provisioning (no hardcoded creds).** Candidate: **WiFiManager** (tzapu) captive portal. On first boot / when it can't connect, the gauge starts its own AP (`SignalK-Gauge-XXXX`); user joins from a phone, picks their WiFi + enters password **and the SignalK server address**, saved to flash, reconnect. Same web stack as #2. A reset-to-AP gesture (long-press / boot button) lets it move between boats.
+
+> Architecture note: #2 and #3 share the web-server stack; the UI (#1) just renders whatever the stored config points at. Keep the data source a single config value (server address) so MQTT-vs-WebSocket stays a one-line change (see Data Architecture).
+
+---
+
 ## Remote Access (Phase 2) — Tailscale
 
 **Goal:** see live boat data on a gauge at home.
@@ -190,7 +202,7 @@ All the brief's planned paths exist on the real model. Units are **SI**, exactly
 - ~~Final transport~~ ✅ **WebSocket now (`ws://192.168.8.96/signalk/v1/stream`); MQTT later (broker not yet running on openplot).**
 - First gauge: single round dial (wind/heading) vs multi-data dashboard
 - **NEW — GPS fix:** position/SOG/COG are null at the dock. Confirm a live fix exists (boat underway, or GPS antenna) before relying on nav data or building anchor-watch.
-- **NEW — backlight whine (open):** the board emits a constant audible tone whenever the LCD backlight is on. Confirmed via I2C testing that it tracks the CH422G **EXIO0/P0** pin 1:1 (P0 high → backlight ON + tone; P0 low → backlight OFF + silent). So it's **backlight-driver whine**, not a separate buzzer, and can't be silenced by toggling P0 without blanking the screen. To try: lower the RGB **PCLK** / adjust porches to shift the tone out of audible range; or investigate the `EXIO_PWM` pin for backlight brightness/PWM dimming. Needs on-boat ears to tune.
+- ✅ **RESOLVED — constant tone was a floating-pin buzzer (not backlight whine):** Waveshare's demo sets the expander (@0x24, TCA9554-style) config reg `0x03 = 0x3A`, which leaves pins **P1/P3/P4/P5 as floating INPUTS**. The onboard active buzzer hangs off one of P4/P5, and floating drove it → constant tone. **FIX (in `app`): config `0x03 = 0x00` (all pins outputs) + output `0x01 = 0xFF` (all high).** Backlight (P0) on, LCD/touch reset (P3/P1) released, buzzer pin driven HIGH = silent. Verified on-boat 2026-06-13. (Earlier "backlight whine / CH422G" diagnoses were wrong — the chip is a plain expander at 0x24 only; 0x23/0x38 NACK.)
 
 ---
 
@@ -204,7 +216,7 @@ A dedicated gauge mode showing how the boat is riding at anchor, tied back to Si
 - **Gauge view ideas:** a top-down "boat-on-a-tether" plot (drop point + swing circle + current position track), current range vs. max-set radius, and a clear drag-alarm state. At night, a dim/red night-mode skin for the V-berth.
 - **Ties into existing decisions:** this is exactly the kind of "boat health at rest" panel the Remote Access section already flags as the real at-home value. A second gauge unit in the V-berth fits the "it's just a server address" multi-client architecture — no extra wiring.
 - **Open question:** does openplot already run an anchor-alarm plugin, or do we install one? (Plugin install is an at-boat / openplot task, like `signalk-mqtt-push`.)
-- **🔔 Alarm output — the onboard buzzer (wanted, 2026-06-13):** the board has a dedicated, separately-controllable active buzzer (schematic "Bee" block, driven via the `EXIO_PWM` expander pin + SS8050 transistor) — *distinct* from the always-on backlight whine. It's silent by default. **Plan: drive it from on-device alarm logic** so the gauge can physically wake the skipper in the V-berth on: anchor drag / boundary breach, low battery SoC, high bilge, shore-power loss, etc. This makes the gauge a standalone monitor+alarm, not just a display — the boundaries can live on the ESP32 so it alarms even if SignalK/openplot hiccups (as long as data is flowing). **TODO:** determine how `EXIO_PWM` is driven (expander register vs native GPIO) and add a `buzzer.on()/off()` + pattern (beep cadence per alarm type).
+- **🔔 Alarm output — the onboard buzzer (wanted, 2026-06-13):** the board has a dedicated, separately-controllable active buzzer (schematic "Bee" block, driven via the `EXIO_PWM` expander pin + SS8050 transistor) — *distinct* from the always-on backlight whine. It's silent by default. **Plan: drive it from on-device alarm logic** so the gauge can physically wake the skipper in the V-berth on: anchor drag / boundary breach, low battery SoC, high bilge, shore-power loss, etc. This makes the gauge a standalone monitor+alarm, not just a display — the boundaries can live on the ESP32 so it alarms even if SignalK/openplot hiccups (as long as data is flowing). **Buzzer control (learned 2026-06-13):** the buzzer is on expander pin **P4 or P5** (not yet narrowed); it is **active-low** — driving its pin HIGH = silent (current default state), LOW = sounds. **TODO:** 5-sec test to confirm which pin (drive P4 low, then P5 low, hear which beeps), then add `buzzer.on()/off()` + beep-cadence patterns per alarm type. No extra hardware needed — the onboard buzzer is the alarm output.
 
 ---
 
