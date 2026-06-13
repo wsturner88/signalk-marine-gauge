@@ -23,6 +23,25 @@ A standalone 4" ESP32 touchscreen that displays live boat data (wind, heading, S
 
 ---
 
+## Current Firmware Status & Open Issues — handoff 2026-06-13
+
+**`firmware/` env `app` is the product.** Build: `pio run -e app -t upload` (pioarduino core 3.3.2). Confirmed working on-boat: WiFi (`bijoux`), SignalK data, touch, display, all pages render. Footer = SignalK logo (recolors green/red by SK status) + WiFi icon.
+
+**5 swipeable LVGL pages** (`lv_tileview`): 0 Wind (boat-bow image + rim wind-arrow + rotating N/E/S/W compass driven by `headingMagnetic` + big AWS + STW/TWS corners), 1 Speed+Depth (montserrat_150 big digits), 2 Status (battery/fuel/3 fresh-water tanks/cabin), 3 Power (SoC ring + charge/discharge box + solar + AC-source card), 4 TEST (temporary BEEP button).
+
+**Data:** targeted SignalK WS subscription (rate-limited paths) — see `sendSubscription()`. Generated assets in `src/app/`: `montserrat_80.c`, `montserrat_150.c` (digit fonts via `lv_font_conv`), `sk_logo.c`, `boat_img.c` (alpha images via Pillow).
+
+**Expander/display init (WORKING, keep):** CH-style expander @0x24, register-pointer protocol. `reg 0x03 (config) = 0x0A` (P1/P3 = inputs for touch/LCD reset; P0/P2/P4-P7 outputs) + `reg 0x01 (output) = 0xFF` → backlight on, touch+LCD reset released, **buzzer pin driven HIGH = silent.** GT911 touch: probe 0x5D then 0x14.
+
+### Open issues (next session)
+1. **RGB rendering / tearing (biggest).** Symptoms: ~15-line vertical offset on boot (now self-corrects, helped by the `bb_invalidate_cache` patch below); after a swipe, content shifts LEFT (tileview scroll not snapping clean). Root cause: the graphics lib hardcodes a **single framebuffer** (`Arduino_ESP32RGBPanel.cpp`: `num_fbs=1`, `double_fb=false`) → no VSYNC double-buffering → tearing/offset. **Fix to try:** `num_fbs=2` + `double_fb=true` + LVGL **direct mode** (lib exposes `getFramebuffer()`); and/or force `lv_obj_scroll_to`/hard-snap the tileview on `LV_EVENT_SCROLL_END`. Riskier change — commit first, test, revert if garbage.
+2. **Buzzer beep doesn't work on demand.** Driving the pin LOW (`0x01=0xCF`) and floating it (`0x03=0x3A`) both fail to produce a reliable beep. **Hypothesis: it's a PASSIVE buzzer** (needs a ~2-4 kHz square wave; the original constant tone was the floating pin picking up noise). Can't square-wave it through the slow I²C expander. **TODO:** trace the buzzer pin (P4/P5) in the V4 schematic to see if it reaches a native ESP32 GPIO (→ hardware `ledcWrite` PWM), else use an external buzzer on a spare GPIO for the anchor alarm. Boot does a 2-beep A/B diagnostic (drive-low / float) — neither confirmed audible yet.
+3. **⚠️ VENDOR PATCH not in git.** `vendor/.../GFX_Library_for_Arduino/src/databus/Arduino_ESP32RGBPanel.cpp` (~line 91) was changed `bb_invalidate_cache = false → true`. `vendor/` is **gitignored**, so this is lost on a fresh clone (fine for continuing on THIS machine — file persists on disk). **Make persistent:** move the GFX lib into a tracked `firmware/lib/`, or add a patch script, before publishing the repo.
+
+Repo: `github.com/wsturner88/signalk-marine-gauge` (private). Commit at each working checkpoint.
+
+---
+
 ## Hardware
 
 **Board:** Waveshare ESP32-S3-Touch-LCD-4 (4", 480×480 capacitive touch).

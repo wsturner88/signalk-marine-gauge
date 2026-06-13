@@ -64,7 +64,11 @@ static void touch_read(lv_indev_drv_t *, lv_indev_data_t *data) {
 static void exReg(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(0x24); Wire.write(reg); Wire.write(val); Wire.endTransmission();
 }
-static void beep(int ms) {       // float buzzer pin (config 0x3A) -> sounds; 0x0A -> silent
+// Two candidate beep mechanisms (config 0x0A keeps P4/P5 as outputs):
+static void beepDrive(int ms) {  // drive P4/P5 LOW (active-low buzzer), then back HIGH
+  exReg(0x01, 0xCF); delay(ms); exReg(0x01, 0xFF);
+}
+static void beepFloat(int ms) {  // float P4/P5 (config 0x3A), then drive again
   exReg(0x03, 0x3A); delay(ms); exReg(0x03, 0x0A);
 }
 
@@ -312,7 +316,7 @@ static void buildPower(lv_obj_t *tile) {
 }
 
 // ---- page 4: temporary test page (buzzer button) ----
-static void beepBtnCb(lv_event_t *) { beep(200); }
+static void beepBtnCb(lv_event_t *) { beepDrive(250); }
 static void buildTest(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
   titleLabel(tile, "TEST");
@@ -562,8 +566,10 @@ void setup() {
 }
 
 void loop() {
+  // boot beep diagnostic: try BOTH methods so we learn which one sounds the buzzer.
+  // You should hear: [beep A = drive-low] ... pause ... [beep B = float]. Tell me which.
   static bool beeped = false;
-  if (!beeped && millis() > 1200) { beeped = true; beep(300); }  // single boot beep
+  if (!beeped && millis() > 1200) { beeped = true; beepDrive(250); delay(500); beepFloat(250); }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); }
