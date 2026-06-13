@@ -42,6 +42,7 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
 
 static uint32_t W, H;
 static lv_disp_draw_buf_t draw_buf;
+static esp_lcd_panel_handle_t panelHandle = nullptr;
 #define TICK_MS 2
 static void disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *px) {
   gfx->draw16bitRGBBitmap(a->x1, a->y1, (uint16_t *)&px->full,
@@ -546,6 +547,7 @@ void setup() {
 
   gfx->begin();
   W = gfx->width(); H = gfx->height();
+  panelHandle = rgbpanel->getPanelHandle();  // for the post-boot scan-out resync
   lv_init();
   uint32_t bp = W * 40;
   lv_color_t *b1 = (lv_color_t *)heap_caps_malloc(bp * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -570,6 +572,11 @@ void loop() {
   // You should hear: [beep A = drive-low] ... pause ... [beep B = float]. Tell me which.
   static bool beeped = false;
   if (!beeped && millis() > 1200) { beeped = true; beepDrive(250); delay(500); beepFloat(250); }
+  // One-shot RGB scan-out resync: the GDMA can start mid-frame at boot, leaving
+  // the image circularly shifted up by ~vsync-porch lines (top wraps to bottom).
+  // Restarting the panel transmission re-aligns the DMA to line 0.
+  static bool fbResynced = false;
+  if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); }
