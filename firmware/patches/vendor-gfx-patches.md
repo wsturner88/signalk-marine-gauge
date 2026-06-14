@@ -11,26 +11,26 @@ Library root:
 
 ---
 
-## Patch 1 — DISABLE the bounce buffer (stops the image drifting under WiFi)
+## Patch 1 — reduce boot vertical offset (cache coherency)
 
 File: `src/databus/Arduino_ESP32RGBPanel.cpp` (in the `getFrameBuffer()` panel
-config, ~line 75).
+config, ~line 91).
 
-Change the bounce-buffer size to `0`:
+Change the framebuffer flag from `false` to `true`:
 
 ```c
-.bounce_buffer_size_px = 0,    // was: 40 * w
+.bb_invalidate_cache = true,    // was: false
 ```
 
-Why: with a bounce buffer, its refill ISR gets starved by WiFi bursts and the
-RGB pixel feed slips → the image drifts up permanently (top wraps to bottom),
-recurring every few minutes. Disabling it makes the RGB DMA read the PSRAM
-framebuffer directly (no refill ISR to starve). Octal PSRAM bandwidth far
-exceeds the scan need at 12 MHz pclk, so direct read is stable. **This is the
-real fix for the vertical-offset bug.** (2026-06-13.)
+Why: makes the RGB DMA see fresh framebuffer pixels, reducing boot
+vertical-offset/tearing artifacts.
 
-Note: the nearby `.bb_invalidate_cache = true` flag (an earlier patch) is now
-moot since there's no bounce buffer, but it's harmless — leave it as-is.
+> NOTE on the bounce buffer (`.bounce_buffer_size_px`): leave it at the vendor
+> default `40 * w` (bounce buffer ON). We briefly set it to `0` to stop an
+> under-WiFi image drift — that worked, BUT it made cold power-on unreliable
+> (screen sometimes came up black). Reliable boot was chosen over no-drift, so
+> the bounce buffer stays ON. The boot vertical offset is instead fixed by a
+> one-shot `esp_lcd_rgb_panel_restart()` ~800 ms after boot in `main.cpp`.
 
 ---
 

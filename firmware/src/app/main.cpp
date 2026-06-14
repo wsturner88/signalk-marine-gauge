@@ -65,18 +65,36 @@ static void touch_read(lv_indev_drv_t *, lv_indev_data_t *data) {
 static void exReg(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(0x24); Wire.write(reg); Wire.write(val); Wire.endTransmission();
 }
-// Two candidate beep mechanisms (config 0x0A keeps P4/P5 as outputs):
-static void beepDrive(int ms) {  // drive P4/P5 LOW (active-low buzzer), then back HIGH
-  exReg(0x01, 0xCF); delay(ms); exReg(0x01, 0xFF);
+// PASSIVE buzzer on an expander pin (P4 or P5): a steady level is silent; only a
+// square wave makes a tone. Toggle the output bit as fast as I2C allows (~1.5kHz)
+// for durMs. lowVal = output-reg value with the target pin LOW, all others HIGH
+// (so backlight P0 stays on, touch/LCD reset P1/P3 are inputs and unaffected).
+// Drive P4 (= EXIO5 = BEE_EN, the buzzer per the schematic) as a square wave at a
+// chosen half-period. A passive magnetic buzzer is loudest near its ~2.5-4kHz
+// resonance, so the TEST button sweeps the frequency to find where it sings.
+static void buzzFreq(uint8_t lowVal, int halfUs, int durMs) {
+  Wire.setClock(400000);                 // fast I2C so the toggle isn't the bottleneck
+  uint32_t end = millis() + (uint32_t)durMs;
+  while (millis() < end) {
+    exReg(0x01, lowVal); delayMicroseconds(halfUs);   // target pin low
+    exReg(0x01, 0xFF);   delayMicroseconds(halfUs);   // target pin high
+  }
+  exReg(0x01, 0xFF);                     // leave silent (all high)
+  Wire.setClock(100000);                  // restore default for touch/RTC
 }
-static void beepFloat(int ms) {  // float P4/P5 (config 0x3A), then drive again
-  exReg(0x03, 0x3A); delay(ms); exReg(0x03, 0x0A);
-}
+#define NBUZZ 6
+static int buzzIdx = 0;   // which pin+frequency the BEEP button tries next
+// Test BOTH candidate pins (P4=0xEF, P5=0xDF) across the resonant band.
+static const uint8_t buzzMask[NBUZZ] = {0xEF, 0xEF, 0xEF, 0xDF, 0xDF, 0xDF};
+static const int     buzzHalf[NBUZZ] = {160,  90,   35,   160,  90,   35  };
+static const char   *buzzHz[NBUZZ]   = {"P4 ~2kHz", "P4 ~2.7kHz", "P4 ~4kHz",
+                                        "P5 ~2kHz", "P5 ~2.7kHz", "P5 ~4kHz"};
 
 // ---------------- Live data ----------------
 struct Boat {
   float windAngleApp = NAN, windSpeedApp = NAN;
   float windAngleAppAvg = NAN, windSpeedTrue = NAN;
+  float gust5m = NAN, gust1h = NAN;   // true wind gust, 5-min & 1-hr (m/s)
   float heading = NAN;
   float depth = NAN, stw = NAN;
   float battSoc = NAN, battV = NAN, battA = NAN, battW = NAN;
@@ -88,8 +106,8 @@ struct Boat {
 static bool dataDirty = false;
 
 // ---------------- UI handles ----------------
-#define NTILES 5
-static lv_obj_t *tiles[NTILES], *pageDots, *skIcon, *wifiIcon;
+#define NTILES 6
+static lv_obj_t *tiles[NTILES], *pageDots;
 // wind
 static lv_obj_t *windMeter, *windArrow, *windSpeedLbl, *windAngleLbl, *stwLbl, *twsLbl;
 static lv_obj_t *cardinals[8];
@@ -105,9 +123,20 @@ static lv_obj_t *battBar, *battLbl, *fuelBar, *fuelLbl;
 static lv_obj_t *wPortBar, *wPortLbl, *wStbdBar, *wStbdLbl, *wAftBar, *wAftLbl, *cabinLbl;
 // power
 static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yieldLbl, *srcLbl;
+// system / connection page
+static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
+static lv_obj_t *buzzPinLbl;   // TEST page: shows which buzzer pin was last beeped
 
-static void setSk(bool ok)   { lv_obj_set_style_img_recolor(skIcon, lv_color_hex(ok ? C_GREEN : C_RED), 0); }
-static void setWifi(bool ok) { lv_obj_set_style_text_color(wifiIcon, lv_color_hex(ok ? C_GREEN : C_RED), 0); }
+static void setSk(bool ok) {
+  if (!sysSkState) return;
+  lv_label_set_text(sysSkState, ok ? "Connected" : "Disconnected");
+  lv_obj_set_style_text_color(sysSkState, lv_color_hex(ok ? C_GREEN : C_RED), 0);
+}
+static void setWifi(bool ok) {
+  if (!sysWifiState) return;
+  lv_label_set_text(sysWifiState, ok ? "Connected" : "Disconnected");
+  lv_obj_set_style_text_color(sysWifiState, lv_color_hex(ok ? C_GREEN : C_RED), 0);
+}
 
 // ---- helpers ----
 static lv_obj_t *card(lv_obj_t *parent, int x, int y, int w, int h, const char *title) {
@@ -225,6 +254,14 @@ static void buildWind(lv_obj_t *tile) {
   dimLbl(windMeter, "kn STW", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, 6, 38);
   twsLbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_TOP_RIGHT, -6, 6);
   dimLbl(windMeter, "kn TWS", &lv_font_montserrat_14, LV_ALIGN_TOP_RIGHT, -6, 38);
+
+  // true-wind gusts in the bottom corners (knots), 5-min (left) / 1-hr (right)
+  dimLbl(windMeter, "GUST 5m", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_LEFT, 6, -36);
+  gust5Lbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_LEFT, 6, -6);
+  lv_obj_set_style_text_color(gust5Lbl, lv_color_hex(C_YELLOW), 0);
+  dimLbl(windMeter, "GUST 1h", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_RIGHT, -6, -36);
+  gust1hLbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
+  lv_obj_set_style_text_color(gust1hLbl, lv_color_hex(C_YELLOW), 0);
 }
 
 // ---- page 1: speed + depth ----
@@ -317,7 +354,16 @@ static void buildPower(lv_obj_t *tile) {
 }
 
 // ---- page 4: temporary test page (buzzer button) ----
-static void beepBtnCb(lv_event_t *) { beepDrive(250); }
+// Sweep the buzzer (P4) across the resonant band; each press tries the next
+// frequency for 700ms and shows it. Tell me which one is loudest.
+static void beepBtnCb(lv_event_t *) {
+  int i = buzzIdx;
+  buzzFreq(buzzMask[i], buzzHalf[i], 700);
+  buzzIdx = (buzzIdx + 1) % NBUZZ;
+  char b[60];
+  snprintf(b, sizeof(b), "tried %s   (next: %s)", buzzHz[i], buzzHz[buzzIdx]);
+  lv_label_set_text(buzzPinLbl, b);
+}
 static void buildTest(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
   titleLabel(tile, "TEST");
@@ -332,7 +378,52 @@ static void buildTest(lv_obj_t *tile) {
   lv_obj_set_style_text_font(l, &lv_font_montserrat_28, 0);
   lv_obj_center(l);
   lv_obj_add_event_cb(btn, beepBtnCb, LV_EVENT_CLICKED, NULL);
-  dimLbl(tile, "temporary buzzer test", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -60);
+  buzzPinLbl = dimLbl(tile, "press BEEP to cycle buzzer tests; tell me which (if any) sounds", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -60);
+}
+
+// ---- page 5: system / connection (WiFi + SignalK status, gusts in corners) ----
+static void buildSystem(lv_obj_t *tile) {
+  lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
+  titleLabel(tile, "SYSTEM");
+
+  // WiFi card
+  lv_obj_t *cw = card(tile, 24, 96, 432, 150, "WiFi");
+  sysWifiState = lv_label_create(cw);
+  lv_label_set_text(sysWifiState, "Disconnected");
+  lv_obj_set_style_text_font(sysWifiState, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_color(sysWifiState, lv_color_hex(C_RED), 0);
+  lv_obj_align(sysWifiState, LV_ALIGN_TOP_LEFT, 0, 30);
+  sysWifiInfo = lv_label_create(cw);
+  lv_label_set_text(sysWifiInfo, "--");
+  lv_obj_set_style_text_font(sysWifiInfo, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(sysWifiInfo, lv_color_hex(C_DIM), 0);
+  lv_obj_align(sysWifiInfo, LV_ALIGN_TOP_LEFT, 0, 72);
+
+  // SignalK card
+  lv_obj_t *cs = card(tile, 24, 262, 432, 150, "SignalK data");
+  sysSkState = lv_label_create(cs);
+  lv_label_set_text(sysSkState, "Disconnected");
+  lv_obj_set_style_text_font(sysSkState, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_color(sysSkState, lv_color_hex(C_RED), 0);
+  lv_obj_align(sysSkState, LV_ALIGN_TOP_LEFT, 0, 30);
+  sysSkInfo = lv_label_create(cs);
+  lv_label_set_text(sysSkInfo, "--");
+  lv_obj_set_style_text_font(sysSkInfo, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(sysSkInfo, lv_color_hex(C_DIM), 0);
+  lv_obj_align(sysSkInfo, LV_ALIGN_TOP_LEFT, 0, 72);
+}
+
+// refresh WiFi/SignalK detail text (called periodically + on connect)
+static void updateSysInfo() {
+  if (!sysWifiInfo) return;
+  char b[80];
+  if (WiFi.status() == WL_CONNECTED)
+    snprintf(b, sizeof(b), "%s\n%s   %ld dBm", WIFI_SSID, WiFi.localIP().toString().c_str(), (long)WiFi.RSSI());
+  else
+    snprintf(b, sizeof(b), "%s\n(joining...)", WIFI_SSID);
+  lv_label_set_text(sysWifiInfo, b);
+  snprintf(b, sizeof(b), "%s : %d\n%s", SK_HOST, SK_PORT, SK_PATH);
+  lv_label_set_text(sysSkInfo, b);
 }
 
 static void updateDots() {
@@ -343,7 +434,17 @@ static void updateDots() {
   for (int i = 0; i < NTILES; i++) strcat(buf, i == idx ? "#4FC3F7 \xE2\x97\x8F# " : "#37474F \xE2\x97\x8F# ");
   lv_label_set_text(pageDots, buf);
 }
-static void onTile(lv_event_t *) { updateDots(); lv_obj_invalidate(lv_scr_act()); }
+// On a page change, schedule ONE clean repaint shortly after the swipe settles.
+// The actual repaint runs in loop() (see tileRefreshPending) — never inside the
+// scroll event, since heavy work there makes the swipe stutter and can hang.
+static uint32_t tileChangedAt = 0;
+static bool tileRefreshPending = false;
+static void onTile(lv_event_t *) {
+  updateDots();
+  lv_obj_invalidate(lv_scr_act());
+  tileChangedAt = millis();
+  tileRefreshPending = true;
+}
 
 static void buildUI() {
   lv_obj_t *scr = lv_scr_act();
@@ -352,23 +453,15 @@ static void buildUI() {
   lv_obj_set_style_bg_color(tv, lv_color_hex(C_BG), 0);
   lv_obj_set_style_bg_opa(tv, LV_OPA_COVER, 0);
   for (int i = 0; i < NTILES; i++) tiles[i] = lv_tileview_add_tile(tv, i, 0, LV_DIR_HOR);
-  buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]); buildTest(tiles[4]);
+  buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]);
+  buildTest(tiles[4]); buildSystem(tiles[5]);
   lv_obj_add_event_cb(tv, onTile, LV_EVENT_VALUE_CHANGED, NULL);
 
-  skIcon = lv_img_create(scr);
-  lv_img_set_src(skIcon, &sk_logo);
-  lv_obj_set_style_img_recolor_opa(skIcon, LV_OPA_COVER, 0);
-  lv_obj_align(skIcon, LV_ALIGN_BOTTOM_LEFT, 8, -2);
-  setSk(false);
-  wifiIcon = lv_label_create(scr);
-  lv_label_set_text(wifiIcon, LV_SYMBOL_WIFI);
-  lv_obj_set_style_text_font(wifiIcon, &lv_font_montserrat_20, 0);
-  lv_obj_align(wifiIcon, LV_ALIGN_BOTTOM_RIGHT, -10, -6);
-  setWifi(false);
   pageDots = lv_label_create(scr);
   lv_label_set_recolor(pageDots, true);
-  lv_label_set_text(pageDots, "#4FC3F7 \xE2\x97\x8F# #37474F \xE2\x97\x8F# #37474F \xE2\x97\x8F# #37474F \xE2\x97\x8F# #37474F \xE2\x97\x8F# ");
   lv_obj_align(pageDots, LV_ALIGN_BOTTOM_MID, 0, -8);
+  updateDots();         // render the correct number of dots for NTILES
+  setSk(false); setWifi(false);   // init the status labels on the system page
 }
 
 static uint32_t socColor(float soc) { return soc < 0.20f ? C_RED : (soc < 0.50f ? C_YELLOW : C_GREEN); }
@@ -404,6 +497,9 @@ static void updateUI() {
   if (!isnan(boat.windSpeedApp))  { snprintf(b, sizeof(b), "%.1f", boat.windSpeedApp * 1.94384f);  lv_label_set_text(windSpeedLbl, b); }
   if (!isnan(boat.stw))           { snprintf(b, sizeof(b), "%.1f", boat.stw * 1.94384f);           lv_label_set_text(stwLbl, b); lv_label_set_text(sdSpeed, b); }
   if (!isnan(boat.windSpeedTrue)) { snprintf(b, sizeof(b), "%.1f", boat.windSpeedTrue * 1.94384f); lv_label_set_text(twsLbl, b); }
+  // --- gusts (system page corners) ---
+  if (!isnan(boat.gust5m)) { snprintf(b, sizeof(b), "%.0f", boat.gust5m * 1.94384f); lv_label_set_text(gust5Lbl, b); }
+  if (!isnan(boat.gust1h)) { snprintf(b, sizeof(b), "%.0f", boat.gust1h * 1.94384f); lv_label_set_text(gust1hLbl, b); }
   {
     float hd = isnan(boat.heading) ? 0 : boat.heading * 57.2958f;
     for (int i = 0; i < 8; i++) {
@@ -463,6 +559,8 @@ static void sendSubscription() {
     "{\"path\":\"environment.wind.angleApparent\",\"period\":250},"
     "{\"path\":\"environment.wind.speedApparent\",\"period\":250},"
     "{\"path\":\"environment.wind.speedTrue\",\"period\":400},"
+    "{\"path\":\"environment.wind.fiveMinutes.gustTrue\",\"period\":5000},"
+    "{\"path\":\"environment.wind.oneHour.gustTrue\",\"period\":10000},"
     "{\"path\":\"navigation.headingMagnetic\",\"period\":500},"
     "{\"path\":\"environment.depth.belowTransducer\",\"period\":1000},"
     "{\"path\":\"navigation.speedThroughWater\",\"period\":1000},"
@@ -496,6 +594,8 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   // wind instrument — only the direction arrow is smoothed (see angleApparent).
   else if (!strcmp(p, "environment.wind.speedApparent")) boat.windSpeedApp = v.as<float>();
   else if (!strcmp(p, "environment.wind.speedTrue")) boat.windSpeedTrue = v.as<float>();
+  else if (!strcmp(p, "environment.wind.fiveMinutes.gustTrue")) boat.gust5m = v.as<float>();
+  else if (!strcmp(p, "environment.wind.oneHour.gustTrue")) boat.gust1h = v.as<float>();
   else if (!strcmp(p, "navigation.headingMagnetic")) boat.heading = v.as<float>();
   else if (!strcmp(p, "environment.depth.belowTransducer")) boat.depth = v.as<float>();
   else if (!strcmp(p, "navigation.speedThroughWater")) boat.stw = v.as<float>();
@@ -571,10 +671,6 @@ void setup() {
 }
 
 void loop() {
-  // boot beep diagnostic: try BOTH methods so we learn which one sounds the buzzer.
-  // You should hear: [beep A = drive-low] ... pause ... [beep B = float]. Tell me which.
-  static bool beeped = false;
-  if (!beeped && millis() > 1200) { beeped = true; beepDrive(250); delay(500); beepFloat(250); }
   // One-shot scan-out resync ~800ms after boot: the GDMA can start mid-frame on
   // power-up, leaving a boot vertical offset. With the bounce buffer disabled the
   // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
@@ -582,13 +678,18 @@ void loop() {
   if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
-    if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); }
+    if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
     ws.loop();
   } else if (up) { up = false; setWifi(false); }
   static uint32_t lastUI = 0;
   if (dataDirty && millis() - lastUI > 150) { lastUI = millis(); dataDirty = false; updateUI(); }
+  // ~400ms after a swipe lands, recompute wind positions + repaint once (clean
+  // restore of the wind page). Runs here in loop context, so it can't stutter the swipe.
+  if (tileRefreshPending && millis() - tileChangedAt > 400) {
+    tileRefreshPending = false; updateUI(); lv_obj_invalidate(lv_scr_act());
+  }
   lv_timer_handler();
   static uint32_t beat = 0;
-  if (millis() - beat > 4000) { beat = millis(); Serial.printf("[beat] up=%lus wifi=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), ESP.getFreeHeap(), touchOK); }
+  if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), ESP.getFreeHeap(), touchOK); }
   delay(5);
 }
