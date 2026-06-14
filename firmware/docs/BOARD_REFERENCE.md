@@ -112,6 +112,20 @@ exReg(0x03, 0x3A);   // output: working display/backlight/reset state, buzzer of
 - Heartbeat on serial every 4 s: `[beat] up=.. wifi=.. heap=.. touch=..`
   (`wifi=3` = connected). Use the DTR capture method to see it.
 
+## Known OPEN display issues (still being worked)
+
+1. **Vertical offset (~14–20 lines):** the image is shifted up and the top strip
+   wraps to the bottom — a circular RGB scan-out offset (GDMA starts mid-frame).
+   Mitigation in place: one-shot `esp_lcd_rgb_panel_restart()` ~800 ms after boot.
+   Still seen at times — needs a more robust fix (restart timing, or the deeper
+   WiFi/bounce-buffer contention fix, e.g. pinning WiFi and LVGL to separate cores).
+   To diagnose: note whether it's present immediately at boot vs. appears after a
+   minute of WiFi traffic (boot-offset vs. drift — different fixes).
+2. **Swiping is sluggish on the Wind page:** that page is the heaviest to render
+   (lv_meter + rotating compass + rim arrow), so touch/scroll feels laggy there.
+   A settle-refresh on scroll-end was added; the real fix is likely lightening the
+   wind page's redraw cost (or simplifying the meter).
+
 ## Quick recovery checklist if the screen is black
 1. Did you **power-cycle** after the last flash? Do that first.
 2. I2C scan shows `0x24/0x51/0x5D`? If not, check the bus.
