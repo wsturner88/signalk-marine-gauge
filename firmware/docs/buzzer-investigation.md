@@ -3,8 +3,15 @@
 Goal: make the onboard buzzer beep on demand so the gauge can sound alarms
 (anchor drag, low battery, shore-power loss, etc.).
 
-Status: **NOT yet working.** Active investigation. This log records every fact
-and every test so we don't repeat dead ends.
+Status: ✅ **SOLVED 2026-06-14.** The expander @0x24 is a **CH32V003**, NOT a
+TCA9554 — completely different register map. Buzzer = output reg `0x03`, **bit 6,
+active-HIGH**. On top of the working display state `0x3A`: silent=`0x3A`,
+beep=`0x7A`. Confirmed beeping on hardware with display + touch intact. Full
+working details in **`firmware/docs/BOARD_REFERENCE.md`**. (Credit: a separate
+research session + the Waveshare demo identified the CH32V003.)
+
+Everything below is the historical investigation (why TCA9554 assumptions failed),
+kept for the record.
 
 ---
 
