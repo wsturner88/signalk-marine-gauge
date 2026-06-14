@@ -661,8 +661,16 @@ void loop() {
   // One-shot scan-out resync ~800ms after boot: the GDMA can start mid-frame on
   // power-up, leaving a boot vertical offset. With the bounce buffer disabled the
   // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
-  static bool fbResynced = false;
-  if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
+  // Scan-out resync to clear the boot vertical offset. Fire a few times in the
+  // first few seconds (each is a brief flicker) and log, so we can see whether a
+  // restart clears the offset and at what point.
+  static int fbResyncs = 0;
+  static uint32_t lastResync = 0;
+  if (fbResyncs < 4 && millis() > 800 && millis() - lastResync > 900) {
+    lastResync = millis(); fbResyncs++;
+    esp_lcd_rgb_panel_restart(panelHandle);
+    Serial.printf("[fb] resync #%d at %lu ms\n", fbResyncs, millis());
+  }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
