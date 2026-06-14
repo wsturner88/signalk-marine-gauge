@@ -80,7 +80,6 @@ static void expanderInit() {
   exReg(0x03, 0x3A);   // output: Waveshare demo's working display state; bit6 LOW (buzzer silent)
 }
 static void buzzer(bool on) { exReg(0x03, on ? 0x7A : 0x3A); }   // bit6 high = beep
-static void buzzDiag() { buzzer(true); delay(1000); buzzer(false); }
 
 // ---------------- Live data ----------------
 struct Boat {
@@ -89,6 +88,8 @@ struct Boat {
   float gust5m = NAN, gust1h = NAN;   // true wind gust, 5-min & 1-hr (m/s)
   float heading = NAN;
   float depth = NAN, stw = NAN;
+  float anchorRadius = NAN, anchorMaxRadius = NAN;   // m (from y2k-anchor-alarm)
+  char  anchorState[16] = "";                        // "" / normal / alert / alarm / emergency
   float battSoc = NAN, battV = NAN, battA = NAN, battW = NAN;
   float fuel = NAN, cabinTemp = NAN;
   float waterPort = NAN, waterStbd = NAN, waterAft = NAN;
@@ -118,7 +119,8 @@ static lv_obj_t *wPortBar, *wPortLbl, *wStbdBar, *wStbdLbl, *wAftBar, *wAftLbl, 
 static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yieldLbl, *srcLbl;
 // system / connection page
 static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
-static lv_obj_t *buzzPinLbl;   // TEST page: shows which buzzer pin was last beeped
+// anchor page
+static lv_obj_t *anchorStateLbl, *anchorRangeLbl, *anchorBar;
 
 static void setSk(bool ok) {
   if (!sysSkState) return;
@@ -346,28 +348,39 @@ static void buildPower(lv_obj_t *tile) {
   srcLbl = bigVal(csrc, &lv_font_montserrat_28); lv_obj_align(srcLbl, LV_ALIGN_LEFT_MID, 0, 0);
 }
 
-// ---- page 4: temporary test page (buzzer button) ----
-// Sweep the buzzer (P4) across the resonant band; each press tries the next
-// frequency for 700ms and shows it. Tell me which one is loudest.
-static void beepBtnCb(lv_event_t *) {
-  buzzDiag();
-  lv_label_set_text(buzzPinLbl, "CH32V003 buzzer: bit6 HIGH 1s");
-}
-static void buildTest(lv_obj_t *tile) {
+// ---- page 4: anchor watch (y2k-anchor-alarm) ----
+// Shows the anchor alarm state + swing range vs the max-set radius; the loop()
+// sounds the buzzer when the plugin reports a drag. "test alarm" button confirms sound.
+static void anchorTestCb(lv_event_t *) { buzzer(true); delay(400); buzzer(false); }
+static void buildAnchor(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
-  titleLabel(tile, "TEST");
-  lv_obj_t *btn = lv_btn_create(tile);
-  lv_obj_set_size(btn, 230, 120);
-  lv_obj_center(btn);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(C_ACCENT), 0);
-  lv_obj_set_style_radius(btn, 18, 0);
-  lv_obj_t *l = lv_label_create(btn);
-  lv_label_set_text(l, LV_SYMBOL_VOLUME_MAX "  BEEP");
-  lv_obj_set_style_text_color(l, lv_color_hex(0x05080F), 0);
-  lv_obj_set_style_text_font(l, &lv_font_montserrat_28, 0);
-  lv_obj_center(l);
-  lv_obj_add_event_cb(btn, beepBtnCb, LV_EVENT_CLICKED, NULL);
-  buzzPinLbl = dimLbl(tile, "press BEEP to cycle buzzer tests; tell me which (if any) sounds", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -60);
+  titleLabel(tile, "ANCHOR");
+  anchorStateLbl = centerNum(tile, &lv_font_montserrat_48, LV_ALIGN_CENTER, 0, -72);
+  lv_label_set_text(anchorStateLbl, "NO ANCHOR");
+  lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(C_DIM), 0);
+  anchorRangeLbl = centerNum(tile, &lv_font_montserrat_36, LV_ALIGN_CENTER, 0, 0);
+  lv_label_set_text(anchorRangeLbl, "--");
+  dimLbl(tile, "RANGE / MAX  (ft)", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 40);
+  anchorBar = lv_bar_create(tile);
+  lv_obj_set_size(anchorBar, 380, 18);
+  lv_obj_align(anchorBar, LV_ALIGN_CENTER, 0, 78);
+  lv_bar_set_range(anchorBar, 0, 100);
+  lv_obj_set_style_bg_color(anchorBar, lv_color_hex(0x1E2A38), LV_PART_MAIN);
+  lv_obj_set_style_radius(anchorBar, 9, LV_PART_MAIN);
+  lv_obj_set_style_radius(anchorBar, 9, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(anchorBar, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
+  // discreet "test alarm" button to confirm the buzzer sound
+  lv_obj_t *tb = lv_btn_create(tile);
+  lv_obj_set_size(tb, 120, 38);
+  lv_obj_align(tb, LV_ALIGN_BOTTOM_MID, 0, -48);
+  lv_obj_set_style_bg_color(tb, lv_color_hex(C_CARD), 0);
+  lv_obj_set_style_bg_opa(tb, LV_OPA_60, 0);
+  lv_obj_set_style_radius(tb, 10, 0);
+  lv_obj_t *tl = lv_label_create(tb);
+  lv_label_set_text(tl, "test alarm");
+  lv_obj_set_style_text_color(tl, lv_color_hex(C_DIM), 0);
+  lv_obj_center(tl);
+  lv_obj_add_event_cb(tb, anchorTestCb, LV_EVENT_CLICKED, NULL);
 }
 
 // ---- page 5: system / connection (WiFi + SignalK status, gusts in corners) ----
@@ -469,7 +482,7 @@ static void buildUI() {
   lv_obj_set_style_bg_opa(tileView, LV_OPA_COVER, 0);
   for (int i = 0; i < NTILES; i++) tiles[i] = lv_tileview_add_tile(tileView, i, 0, LV_DIR_HOR);
   buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]);
-  buildTest(tiles[4]); buildSystem(tiles[5]);
+  buildAnchor(tiles[4]); buildSystem(tiles[5]);
   lv_obj_add_event_cb(tileView, onTile, LV_EVENT_VALUE_CHANGED, NULL);
 
   pageDots = lv_label_create(scr);
@@ -566,6 +579,29 @@ static void updateUI() {
     else if (!strcmp(s, "shore"))     { lv_label_set_text(srcLbl, LV_SYMBOL_CHARGE " Shore");  lv_obj_set_style_text_color(srcLbl, lv_color_hex(C_GREEN), 0); }
     else if (s[0] && strcmp(s, "--")) { lv_label_set_text(srcLbl, s); lv_obj_set_style_text_color(srcLbl, lv_color_hex(C_TEXT), 0); }
   }
+  // --- anchor watch (page 4) ---
+  {
+    bool anchored = !isnan(boat.anchorMaxRadius);
+    bool drag = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency"));
+    bool warn = !strcmp(boat.anchorState, "alert");
+    if (!anchored) {
+      lv_label_set_text(anchorStateLbl, "NO ANCHOR");
+      lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(C_DIM), 0);
+      lv_label_set_text(anchorRangeLbl, "--");
+      lv_bar_set_value(anchorBar, 0, LV_ANIM_OFF);
+    } else {
+      uint32_t col = drag ? C_RED : (warn ? C_YELLOW : C_GREEN);
+      lv_label_set_text(anchorStateLbl, drag ? "DRAGGING!" : (warn ? "WATCH" : "ANCHORED"));
+      lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0);
+      int cur = isnan(boat.anchorRadius) ? 0 : (int)(boat.anchorRadius * 3.28084f + 0.5f);
+      int mx  = (int)(boat.anchorMaxRadius * 3.28084f + 0.5f);
+      snprintf(b, sizeof(b), "%d / %d", cur, mx);
+      lv_label_set_text(anchorRangeLbl, b);
+      int pct = (mx > 0) ? (cur * 100 / mx) : 0; if (pct > 100) pct = 100;
+      lv_bar_set_value(anchorBar, pct, LV_ANIM_OFF);
+      lv_obj_set_style_bg_color(anchorBar, lv_color_hex(col), LV_PART_INDICATOR);
+    }
+  }
 }
 
 // ---------------- SignalK ----------------
@@ -592,7 +628,10 @@ static void sendSubscription() {
     "{\"path\":\"environment.venus.28.temperature\",\"period\":5000},"
     "{\"path\":\"electrical.solar.278.panelPower\",\"period\":2000},"
     "{\"path\":\"electrical.solar.278.yieldToday\",\"period\":5000},"
-    "{\"path\":\"electrical.venus.acSource\",\"period\":5000}"
+    "{\"path\":\"electrical.venus.acSource\",\"period\":5000},"
+    "{\"path\":\"navigation.anchor.currentRadius\",\"period\":1000},"
+    "{\"path\":\"navigation.anchor.maxRadius\",\"period\":5000},"
+    "{\"path\":\"notifications.navigation.anchor\",\"period\":1000}"
     "]}";
   ws.sendTXT(sub);
 }
@@ -628,6 +667,9 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.solar.278.panelPower")) boat.solarW = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
+  else if (!strcmp(p, "navigation.anchor.currentRadius")) boat.anchorRadius = v.as<float>();
+  else if (!strcmp(p, "navigation.anchor.maxRadius")) boat.anchorMaxRadius = v.as<float>();
+  else if (!strcmp(p, "notifications.navigation.anchor")) { const char *s = v["state"].as<const char *>(); if (s) strlcpy(boat.anchorState, s, sizeof(boat.anchorState)); }
   else return;
   dataDirty = true;
 }
@@ -711,6 +753,15 @@ void loop() {
     tileRefreshPending = false; updateUI(); lv_obj_invalidate(lv_scr_act());
   }
   lv_timer_handler();
+  // Anchor drag alarm: pulse the buzzer (~350ms on/off) whenever the y2k plugin
+  // reports alarm/emergency. Non-blocking; sounds regardless of the visible page.
+  {
+    static uint32_t beepAt = 0; static bool alarmOn = false;
+    bool dragging = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency"));
+    if (dragging) {
+      if (millis() - beepAt > 350) { beepAt = millis(); alarmOn = !alarmOn; buzzer(alarmOn); }
+    } else if (alarmOn) { alarmOn = false; buzzer(false); }
+  }
   static uint32_t beat = 0;
   if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), ESP.getFreeHeap(), touchOK); }
   delay(5);
