@@ -65,6 +65,31 @@ static void touch_read(lv_indev_drv_t *, lv_indev_data_t *data) {
 static void exReg(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(0x24); Wire.write(reg); Wire.write(val); Wire.endTransmission();
 }
+static uint8_t exRead(uint8_t reg) {
+  Wire.beginTransmission(0x24); Wire.write(reg); Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)0x24, (uint8_t)1);
+  return Wire.available() ? Wire.read() : 0xEE;
+}
+// Diagnostic. STEP 1 (visible write test): blink the backlight (BL_EN = EXIO2 =
+// P1 = bit1) — if the screen blinks, expander writes work. STEP 2: drive the
+// buzzer (BEE_EN = EXIO6 = P5 = bit5) HIGH, LOW, then PWM.
+static void buzzDiag() {
+  Serial.println("[diag] STEP1 backlight blink x3 (P1)");
+  for (int i = 0; i < 3; i++) {
+    exReg(0x03, 0x08); exReg(0x01, 0xFD); delay(350);   // P1 output, LOW -> backlight OFF
+    exReg(0x01, 0xFF); delay(350);                      // P1 HIGH -> backlight ON
+  }
+  exReg(0x03, 0x0A);                                    // P1 back to input (normal)
+  Serial.println("[diag] STEP2 buzzer P5: HIGH, LOW, PWM");
+  exReg(0x01, 0xFF); delay(1000);                       // P5 HIGH
+  exReg(0x01, 0xDF); delay(1000);                       // P5 LOW
+  Wire.setClock(400000);                                // P5 PWM ~2.7kHz
+  uint32_t end = millis() + 1500;
+  while (millis() < end) { exReg(0x01, 0xDF); delayMicroseconds(90); exReg(0x01, 0xFF); delayMicroseconds(90); }
+  Wire.setClock(100000);
+  exReg(0x01, 0xFF);
+  Serial.println("[diag] done");
+}
 // PASSIVE buzzer on an expander pin (P4 or P5): a steady level is silent; only a
 // square wave makes a tone. Toggle the output bit as fast as I2C allows (~1.5kHz)
 // for durMs. lowVal = output-reg value with the target pin LOW, all others HIGH
@@ -72,23 +97,6 @@ static void exReg(uint8_t reg, uint8_t val) {
 // Drive P4 (= EXIO5 = BEE_EN, the buzzer per the schematic) as a square wave at a
 // chosen half-period. A passive magnetic buzzer is loudest near its ~2.5-4kHz
 // resonance, so the TEST button sweeps the frequency to find where it sings.
-static void buzzFreq(uint8_t lowVal, int halfUs, int durMs) {
-  Wire.setClock(400000);                 // fast I2C so the toggle isn't the bottleneck
-  uint32_t end = millis() + (uint32_t)durMs;
-  while (millis() < end) {
-    exReg(0x01, lowVal); delayMicroseconds(halfUs);   // target pin low
-    exReg(0x01, 0xFF);   delayMicroseconds(halfUs);   // target pin high
-  }
-  exReg(0x01, 0xFF);                     // leave silent (all high)
-  Wire.setClock(100000);                  // restore default for touch/RTC
-}
-#define NBUZZ 6
-static int buzzIdx = 0;   // which pin+frequency the BEEP button tries next
-// Test BOTH candidate pins (P4=0xEF, P5=0xDF) across the resonant band.
-static const uint8_t buzzMask[NBUZZ] = {0xEF, 0xEF, 0xEF, 0xDF, 0xDF, 0xDF};
-static const int     buzzHalf[NBUZZ] = {160,  90,   35,   160,  90,   35  };
-static const char   *buzzHz[NBUZZ]   = {"P4 ~2kHz", "P4 ~2.7kHz", "P4 ~4kHz",
-                                        "P5 ~2kHz", "P5 ~2.7kHz", "P5 ~4kHz"};
 
 // ---------------- Live data ----------------
 struct Boat {
@@ -357,12 +365,8 @@ static void buildPower(lv_obj_t *tile) {
 // Sweep the buzzer (P4) across the resonant band; each press tries the next
 // frequency for 700ms and shows it. Tell me which one is loudest.
 static void beepBtnCb(lv_event_t *) {
-  int i = buzzIdx;
-  buzzFreq(buzzMask[i], buzzHalf[i], 700);
-  buzzIdx = (buzzIdx + 1) % NBUZZ;
-  char b[60];
-  snprintf(b, sizeof(b), "tried %s   (next: %s)", buzzHz[i], buzzHz[buzzIdx]);
-  lv_label_set_text(buzzPinLbl, b);
+  buzzDiag();
+  lv_label_set_text(buzzPinLbl, "P5: HIGH 1.5s, LOW 1.5s, PWM 1.5s");
 }
 static void buildTest(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
@@ -676,6 +680,8 @@ void loop() {
   // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
   static bool fbResynced = false;
   if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
+  static bool buzzDiagDone = false;
+  if (!buzzDiagDone && millis() > 3000) { buzzDiagDone = true; buzzDiag(); }  // auto-run once for serial capture
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
