@@ -70,33 +70,17 @@ static uint8_t exRead(uint8_t reg) {
   Wire.requestFrom((uint8_t)0x24, (uint8_t)1);
   return Wire.available() ? Wire.read() : 0xEE;
 }
-// Diagnostic. STEP 1 (visible write test): blink the backlight (BL_EN = EXIO2 =
-// P1 = bit1) — if the screen blinks, expander writes work. STEP 2: drive the
-// buzzer (BEE_EN = EXIO6 = P5 = bit5) HIGH, LOW, then PWM.
-static void buzzDiag() {
-  Serial.println("[diag] STEP1 backlight blink x3 (P1)");
-  for (int i = 0; i < 3; i++) {
-    exReg(0x03, 0x08); exReg(0x01, 0xFD); delay(350);   // P1 output, LOW -> backlight OFF
-    exReg(0x01, 0xFF); delay(350);                      // P1 HIGH -> backlight ON
-  }
-  exReg(0x03, 0x0A);                                    // P1 back to input (normal)
-  Serial.println("[diag] STEP2 buzzer P5: HIGH, LOW, PWM");
-  exReg(0x01, 0xFF); delay(1000);                       // P5 HIGH
-  exReg(0x01, 0xDF); delay(1000);                       // P5 LOW
-  Wire.setClock(400000);                                // P5 PWM ~2.7kHz
-  uint32_t end = millis() + 1500;
-  while (millis() < end) { exReg(0x01, 0xDF); delayMicroseconds(90); exReg(0x01, 0xFF); delayMicroseconds(90); }
-  Wire.setClock(100000);
-  exReg(0x01, 0xFF);
-  Serial.println("[diag] done");
+// The expander @0x24 is a CH32V003 (NOT a TCA9554!). Registers:
+//   0x02 = direction (1=output), 0x03 = output (1=high).
+// PROVEN display init = Waveshare's own demo: dir 0x02=0xFF, output 0x03=0x3A
+// (that demo lit this exact panel). Buzzer = bit 6 on top of that:
+//   silent = 0x3A ; beep = 0x7A (0x3A | bit6).
+static void expanderInit() {
+  exReg(0x02, 0xFF);   // direction: all outputs (exactly the Waveshare demo)
+  exReg(0x03, 0x3A);   // output: Waveshare demo's working display state; bit6 LOW (buzzer silent)
 }
-// PASSIVE buzzer on an expander pin (P4 or P5): a steady level is silent; only a
-// square wave makes a tone. Toggle the output bit as fast as I2C allows (~1.5kHz)
-// for durMs. lowVal = output-reg value with the target pin LOW, all others HIGH
-// (so backlight P0 stays on, touch/LCD reset P1/P3 are inputs and unaffected).
-// Drive P4 (= EXIO5 = BEE_EN, the buzzer per the schematic) as a square wave at a
-// chosen half-period. A passive magnetic buzzer is loudest near its ~2.5-4kHz
-// resonance, so the TEST button sweeps the frequency to find where it sings.
+static void buzzer(bool on) { exReg(0x03, on ? 0x7A : 0x3A); }   // bit6 high = beep
+static void buzzDiag() { buzzer(true); delay(1000); buzzer(false); }
 
 // ---------------- Live data ----------------
 struct Boat {
@@ -366,7 +350,7 @@ static void buildPower(lv_obj_t *tile) {
 // frequency for 700ms and shows it. Tell me which one is loudest.
 static void beepBtnCb(lv_event_t *) {
   buzzDiag();
-  lv_label_set_text(buzzPinLbl, "P5: HIGH 1.5s, LOW 1.5s, PWM 1.5s");
+  lv_label_set_text(buzzPinLbl, "CH32V003 buzzer: bit6 HIGH 1s");
 }
 static void buildTest(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
@@ -639,8 +623,7 @@ void setup() {
   Serial.begin(115200); delay(800);
   Serial.println("\n\n=== BIJOUX gauge boot ===");
   Wire.begin(15, 7);
-  exReg(0x03, 0x0A);  // P1/P3 inputs (touch/LCD reset), rest outputs
-  exReg(0x01, 0xFF);  // outputs high: backlight on, buzzer silent
+  expanderInit();     // CH32V003: all outputs HIGH (release LCD/touch resets), backlight on, buzzer off
   delay(200);
   uint8_t gtAddr = 0;
   for (uint8_t a : {(uint8_t)0x5D, (uint8_t)0x14}) {
@@ -680,8 +663,6 @@ void loop() {
   // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
   static bool fbResynced = false;
   if (!fbResynced && millis() > 800) { fbResynced = true; esp_lcd_rgb_panel_restart(panelHandle); }
-  static bool buzzDiagDone = false;
-  if (!buzzDiagDone && millis() > 3000) { buzzDiagDone = true; buzzDiag(); }  // auto-run once for serial capture
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
