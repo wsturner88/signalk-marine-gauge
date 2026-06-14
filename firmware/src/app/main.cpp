@@ -89,7 +89,8 @@ struct Boat {
   float heading = NAN;
   float depth = NAN, stw = NAN;
   float anchorRadius = NAN, anchorMaxRadius = NAN;   // m (from y2k-anchor-alarm)
-  char  anchorState[16] = "";                        // "" / normal / alert / alarm / emergency
+  char  anchorOn[8] = "";                            // navigation.anchor.state: "on"/"off"
+  char  anchorState[16] = "";                        // notification state: normal/alert/alarm/emergency
   float battSoc = NAN, battV = NAN, battA = NAN, battW = NAN;
   float fuel = NAN, cabinTemp = NAN;
   float waterPort = NAN, waterStbd = NAN, waterAft = NAN;
@@ -581,20 +582,19 @@ static void updateUI() {
   }
   // --- anchor watch (page 4) ---
   {
-    const char *st = boat.anchorState;
-    bool drag = (!strcmp(st, "alarm") || !strcmp(st, "emergency"));
-    bool warn = !strcmp(st, "alert");
-    bool anchored = !isnan(boat.anchorMaxRadius);
-    // Status is driven by the alarm STATE first (so it shows even without a radius),
-    // then falls back to "ANCHORED" if a max radius is set, else "NO ANCHOR".
+    // Anchored = navigation.anchor.state "on". Dragging = currentRadius beyond
+    // maxRadius (robust — doesn't depend on the notification streaming), OR the
+    // notification escalating to alarm/emergency.
+    bool radDrag = (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius);
+    bool drag = radDrag || !strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency");
+    bool anchored = !strcmp(boat.anchorOn, "on");
     const char *txt; uint32_t col;
     if (drag)          { txt = "DRAGGING!"; col = C_RED; }
-    else if (warn)     { txt = "WATCH";     col = C_YELLOW; }
     else if (anchored) { txt = "ANCHORED";  col = C_GREEN; }
     else               { txt = "NO ANCHOR"; col = C_DIM; }
     lv_label_set_text(anchorStateLbl, txt);
     lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0);
-    if (anchored) {
+    if (!isnan(boat.anchorMaxRadius)) {
       int cur = isnan(boat.anchorRadius) ? 0 : (int)(boat.anchorRadius * 3.28084f + 0.5f);
       int mx  = (int)(boat.anchorMaxRadius * 3.28084f + 0.5f);
       snprintf(b, sizeof(b), "%d / %d", cur, mx);
@@ -634,6 +634,7 @@ static void sendSubscription() {
     "{\"path\":\"electrical.solar.278.panelPower\",\"period\":2000},"
     "{\"path\":\"electrical.solar.278.yieldToday\",\"period\":5000},"
     "{\"path\":\"electrical.venus.acSource\",\"period\":5000},"
+    "{\"path\":\"navigation.anchor.state\",\"period\":2000},"
     "{\"path\":\"navigation.anchor.currentRadius\",\"period\":1000},"
     "{\"path\":\"navigation.anchor.maxRadius\",\"period\":5000},"
     "{\"path\":\"notifications.navigation.anchor\",\"period\":1000}"
@@ -641,7 +642,6 @@ static void sendSubscription() {
   ws.sendTXT(sub);
 }
 static void applyDelta(const char *p, JsonVariantConst v) {
-  if (strstr(p, "anchor")) Serial.printf("[anchor] delta path=%s\n", p);   // debug: is it arriving?
   if (v.isNull()) return;
   if      (!strcmp(p, "environment.wind.angleApparent")) {
     boat.windAngleApp = v.as<float>();
@@ -673,11 +673,11 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.solar.278.panelPower")) boat.solarW = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
+  else if (!strcmp(p, "navigation.anchor.state")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.anchorOn, s, sizeof(boat.anchorOn)); }
   else if (!strcmp(p, "navigation.anchor.currentRadius")) boat.anchorRadius = v.as<float>();
   else if (!strcmp(p, "navigation.anchor.maxRadius")) boat.anchorMaxRadius = v.as<float>();
   else if (!strcmp(p, "notifications.navigation.anchor")) {
     const char *s = v["state"].as<const char *>();
-    Serial.printf("[anchor] notif state=%s\n", s ? s : "(null)");
     if (s) strlcpy(boat.anchorState, s, sizeof(boat.anchorState));
   }
   else return;
@@ -767,7 +767,8 @@ void loop() {
   // reports alarm/emergency. Non-blocking; sounds regardless of the visible page.
   {
     static uint32_t beepAt = 0; static bool alarmOn = false;
-    bool dragging = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency"));
+    bool dragging = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency")) ||
+                    (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius);
     if (dragging) {
       if (millis() - beepAt > 350) { beepAt = millis(); alarmOn = !alarmOn; buzzer(alarmOn); }
     } else if (alarmOn) { alarmOn = false; buzzer(false); }
