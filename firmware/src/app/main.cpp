@@ -581,18 +581,20 @@ static void updateUI() {
   }
   // --- anchor watch (page 4) ---
   {
+    const char *st = boat.anchorState;
+    bool drag = (!strcmp(st, "alarm") || !strcmp(st, "emergency"));
+    bool warn = !strcmp(st, "alert");
     bool anchored = !isnan(boat.anchorMaxRadius);
-    bool drag = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency"));
-    bool warn = !strcmp(boat.anchorState, "alert");
-    if (!anchored) {
-      lv_label_set_text(anchorStateLbl, "NO ANCHOR");
-      lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(C_DIM), 0);
-      lv_label_set_text(anchorRangeLbl, "--");
-      lv_bar_set_value(anchorBar, 0, LV_ANIM_OFF);
-    } else {
-      uint32_t col = drag ? C_RED : (warn ? C_YELLOW : C_GREEN);
-      lv_label_set_text(anchorStateLbl, drag ? "DRAGGING!" : (warn ? "WATCH" : "ANCHORED"));
-      lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0);
+    // Status is driven by the alarm STATE first (so it shows even without a radius),
+    // then falls back to "ANCHORED" if a max radius is set, else "NO ANCHOR".
+    const char *txt; uint32_t col;
+    if (drag)          { txt = "DRAGGING!"; col = C_RED; }
+    else if (warn)     { txt = "WATCH";     col = C_YELLOW; }
+    else if (anchored) { txt = "ANCHORED";  col = C_GREEN; }
+    else               { txt = "NO ANCHOR"; col = C_DIM; }
+    lv_label_set_text(anchorStateLbl, txt);
+    lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0);
+    if (anchored) {
       int cur = isnan(boat.anchorRadius) ? 0 : (int)(boat.anchorRadius * 3.28084f + 0.5f);
       int mx  = (int)(boat.anchorMaxRadius * 3.28084f + 0.5f);
       snprintf(b, sizeof(b), "%d / %d", cur, mx);
@@ -600,6 +602,9 @@ static void updateUI() {
       int pct = (mx > 0) ? (cur * 100 / mx) : 0; if (pct > 100) pct = 100;
       lv_bar_set_value(anchorBar, pct, LV_ANIM_OFF);
       lv_obj_set_style_bg_color(anchorBar, lv_color_hex(col), LV_PART_INDICATOR);
+    } else {
+      lv_label_set_text(anchorRangeLbl, "--");
+      lv_bar_set_value(anchorBar, 0, LV_ANIM_OFF);
     }
   }
 }
@@ -636,6 +641,7 @@ static void sendSubscription() {
   ws.sendTXT(sub);
 }
 static void applyDelta(const char *p, JsonVariantConst v) {
+  if (strstr(p, "anchor")) Serial.printf("[anchor] delta path=%s\n", p);   // debug: is it arriving?
   if (v.isNull()) return;
   if      (!strcmp(p, "environment.wind.angleApparent")) {
     boat.windAngleApp = v.as<float>();
@@ -669,7 +675,11 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
   else if (!strcmp(p, "navigation.anchor.currentRadius")) boat.anchorRadius = v.as<float>();
   else if (!strcmp(p, "navigation.anchor.maxRadius")) boat.anchorMaxRadius = v.as<float>();
-  else if (!strcmp(p, "notifications.navigation.anchor")) { const char *s = v["state"].as<const char *>(); if (s) strlcpy(boat.anchorState, s, sizeof(boat.anchorState)); }
+  else if (!strcmp(p, "notifications.navigation.anchor")) {
+    const char *s = v["state"].as<const char *>();
+    Serial.printf("[anchor] notif state=%s\n", s ? s : "(null)");
+    if (s) strlcpy(boat.anchorState, s, sizeof(boat.anchorState));
+  }
   else return;
   dataDirty = true;
 }
