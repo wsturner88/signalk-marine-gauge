@@ -99,7 +99,8 @@ static bool dataDirty = false;
 
 // ---------------- UI handles ----------------
 #define NTILES 6
-static lv_obj_t *tiles[NTILES], *pageDots;
+static lv_obj_t *tiles[NTILES], *pageDots, *tileView;
+static int curTile = 0;
 // wind
 static lv_obj_t *windMeter, *windArrow, *windSpeedLbl, *windAngleLbl, *stwLbl, *twsLbl;
 static lv_obj_t *cardinals[8];
@@ -428,27 +429,55 @@ static void updateDots() {
 static uint32_t tileChangedAt = 0;
 static bool tileRefreshPending = false;
 static void onTile(lv_event_t *) {
+  lv_obj_t *act = lv_tileview_get_tile_act(tileView);
+  for (int i = 0; i < NTILES; i++) if (act == tiles[i]) curTile = i;
   updateDots();
   lv_obj_invalidate(lv_scr_act());
   tileChangedAt = millis();
   tileRefreshPending = true;
 }
+// Instant page switch (no scroll animation -> no heavy frame-by-frame redraw of
+// the wind page). Used by the on-screen ◀ ▶ nav buttons.
+static void gotoTile(int idx) {
+  if (idx < 0 || idx >= NTILES) return;
+  curTile = idx;
+  lv_obj_set_tile_id(tileView, idx, 0, LV_ANIM_OFF);
+  updateDots();
+  lv_obj_invalidate(lv_scr_act());
+}
+static void navPrevCb(lv_event_t *) { gotoTile(curTile - 1); }
+static void navNextCb(lv_event_t *) { gotoTile(curTile + 1); }
+static void navBtn(lv_obj_t *parent, const char *sym, int xoff, lv_event_cb_t cb) {
+  lv_obj_t *b = lv_btn_create(parent);
+  lv_obj_set_size(b, 54, 42);
+  lv_obj_align(b, LV_ALIGN_BOTTOM_MID, xoff, -2);
+  lv_obj_set_style_bg_color(b, lv_color_hex(C_CARD), 0);
+  lv_obj_set_style_bg_opa(b, LV_OPA_60, 0);
+  lv_obj_set_style_radius(b, 10, 0);
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, sym);
+  lv_obj_set_style_text_color(l, lv_color_hex(C_ACCENT), 0);
+  lv_obj_center(l);
+  lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+}
 
 static void buildUI() {
   lv_obj_t *scr = lv_scr_act();
   lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), 0);
-  lv_obj_t *tv = lv_tileview_create(scr);
-  lv_obj_set_style_bg_color(tv, lv_color_hex(C_BG), 0);
-  lv_obj_set_style_bg_opa(tv, LV_OPA_COVER, 0);
-  for (int i = 0; i < NTILES; i++) tiles[i] = lv_tileview_add_tile(tv, i, 0, LV_DIR_HOR);
+  tileView = lv_tileview_create(scr);
+  lv_obj_set_style_bg_color(tileView, lv_color_hex(C_BG), 0);
+  lv_obj_set_style_bg_opa(tileView, LV_OPA_COVER, 0);
+  for (int i = 0; i < NTILES; i++) tiles[i] = lv_tileview_add_tile(tileView, i, 0, LV_DIR_HOR);
   buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]);
   buildTest(tiles[4]); buildSystem(tiles[5]);
-  lv_obj_add_event_cb(tv, onTile, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(tileView, onTile, LV_EVENT_VALUE_CHANGED, NULL);
 
   pageDots = lv_label_create(scr);
   lv_label_set_recolor(pageDots, true);
   lv_obj_align(pageDots, LV_ALIGN_BOTTOM_MID, 0, -8);
   updateDots();         // render the correct number of dots for NTILES
+  navBtn(scr, LV_SYMBOL_LEFT, -120, navPrevCb);    // instant prev/next page (snappier than swipe)
+  navBtn(scr, LV_SYMBOL_RIGHT, 120, navNextCb);
   setSk(false); setWifi(false);   // init the status labels on the system page
 }
 
@@ -654,16 +683,14 @@ void setup() {
   buildUI();
   WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASS);
   ws.begin(SK_HOST, SK_PORT, SK_PATH); ws.onEvent(wsEvent); ws.setReconnectInterval(3000);
+  buzzer(true); delay(150); buzzer(false);   // short boot beep so you know it powered up
   Serial.println("setup done");
 }
 
 void loop() {
-  // One-shot scan-out resync ~800ms after boot: the GDMA can start mid-frame on
-  // power-up, leaving a boot vertical offset. With the bounce buffer disabled the
-  // image no longer DRIFTS later under WiFi load, so a single boot resync is enough.
-  // Scan-out resync to clear the boot vertical offset. Fire a few times in the
-  // first few seconds (each is a brief flicker) and log, so we can see whether a
-  // restart clears the offset and at what point.
+  // Scan-out resync to clear the boot vertical offset (GDMA starts mid-frame on a
+  // cold boot). Fire a few times in the first few seconds — a single one didn't
+  // clear it on a true cold boot, repeating does. Each is a brief flicker.
   static int fbResyncs = 0;
   static uint32_t lastResync = 0;
   if (fbResyncs < 4 && millis() > 800 && millis() - lastResync > 900) {
