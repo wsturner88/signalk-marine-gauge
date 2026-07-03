@@ -86,4 +86,8 @@
 - [ ] DHCP reservation for the gauge (MAC `58:e6:c5:72:3b:c0`).
 - [ ] Mount the gauge (USB-C power run).
 - [ ] Water thermometer: find why MiniPlex emits 120°C (disconnected sensor / MTW misparse).
-- [ ] Phase 2: home gauge over Tailscale (MQTT broker bridge per CLAUDE.md plan).
+- [ ] Phase 2: home/work gauges over Tailscale — **plan upgraded from MQTT bridge to
+      SignalK mirrors in Docker** (see `deploy/signalk-mirror/`): mserver at home pulls
+      openplot upstream (THROTTLED — 2-3 GB/mo vs 15-25 unthrottled on 100 GB Starlink);
+      work chains off the home mirror so the boat pays once; gauges mDNS-discover their
+      local mirror. Needs: containers stood up + throttle measured + a 2nd gauge unit.
