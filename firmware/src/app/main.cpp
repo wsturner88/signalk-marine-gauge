@@ -16,9 +16,37 @@
 #include "lv_conf.h"
 #include "TouchDrvGT911.hpp"
 #include <Preferences.h>
+#include <ESPmDNS.h>
+#include "portal.h"
 #include "secrets.h"
 
-Preferences prefs;   // NVS: display mode survives power cycles
+Preferences prefs;   // NVS "gauge": display mode + WiFi/SignalK onboarding config
+
+// ---------------- Config (NVS, seeded once from secrets.h if empty) ----------------
+static char cfgSsid[33] = "", cfgPass[65] = "", cfgSkHost[64] = "";
+static uint16_t cfgSkPort = 80;   // cfgSkHost empty = auto-discover SignalK via mDNS
+static void loadConfig() {
+  strlcpy(cfgSsid,   prefs.getString("ssid", "").c_str(),   sizeof(cfgSsid));
+  strlcpy(cfgPass,   prefs.getString("pass", "").c_str(),   sizeof(cfgPass));
+  strlcpy(cfgSkHost, prefs.getString("skhost", "").c_str(), sizeof(cfgSkHost));
+  cfgSkPort = prefs.getUShort("skport", 80);
+#ifdef WIFI_SSID
+  if (!cfgSsid[0]) {   // dev seed: first boot adopts secrets.h so BIJOUX units just work
+    strlcpy(cfgSsid, WIFI_SSID, sizeof(cfgSsid));
+    strlcpy(cfgPass, WIFI_PASS, sizeof(cfgPass));
+    strlcpy(cfgSkHost, SK_HOST, sizeof(cfgSkHost));
+    cfgSkPort = SK_PORT;
+    prefs.putString("ssid", cfgSsid); prefs.putString("pass", cfgPass);
+    prefs.putString("skhost", cfgSkHost); prefs.putUShort("skport", cfgSkPort);
+    Serial.println("[cfg] seeded from secrets.h");
+  }
+#endif
+}
+enum : uint8_t { RM_NORMAL, RM_PORTAL };
+static uint8_t runMode = RM_NORMAL;
+static bool skStarted = false;                     // ws.begin done (host resolved)
+static char skHostRes[64] = ""; static uint16_t skPortRes = 0;
+static void enterPortal();                         // defined with the portal UI below
 
 LV_FONT_DECLARE(montserrat_80);
 LV_FONT_DECLARE(montserrat_150);
@@ -173,7 +201,7 @@ static bool sunIsUp() {
 }
 static void applyBacklight() {
   uint8_t v;
-  if (alarmSounding) v = BL_DAY;                    // alarms override every mode
+  if (alarmSounding || runMode == RM_PORTAL) v = BL_DAY;   // alarms + setup override every mode
   else switch (dispMode) {
     default:
     case DM_DAY:   v = BL_DAY; break;
@@ -206,6 +234,7 @@ static lv_obj_t *wPortBar, *wPortLbl, *wStbdBar, *wStbdLbl, *wAftBar, *wAftLbl, 
 static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yieldLbl, *srcLbl, *ttgLbl;
 // system / connection page
 static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
+static lv_obj_t *wifiSetupLbl; static uint32_t wifiSetupArmedAt = 0;
 // anchor page
 static lv_obj_t *anchorStateLbl, *anchorRangeLbl, *anchorBar;
 static lv_obj_t *anchorPlot, *aWindLbl, *aGustLbl, *aDepthLbl, *aSwingLbl;
@@ -673,6 +702,25 @@ static void buildSystem(lv_obj_t *tile) {
   lv_obj_set_style_text_font(sysWifiInfo, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(sysWifiInfo, lv_color_hex(C_DIM), 0);
   lv_obj_align(sysWifiInfo, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  // WiFi SETUP -> onboarding portal (two taps: arms to SURE?, second tap goes)
+  lv_obj_t *sb = lv_btn_create(cw);
+  lv_obj_set_size(sb, 96, 40);
+  lv_obj_align(sb, LV_ALIGN_TOP_RIGHT, 0, 20);
+  lv_obj_set_style_bg_color(sb, lv_color_hex(0x1E2A38), 0);
+  lv_obj_set_style_radius(sb, 10, 0);
+  wifiSetupLbl = lv_label_create(sb);
+  lv_label_set_text(wifiSetupLbl, "SETUP");
+  lv_obj_set_style_text_color(wifiSetupLbl, lv_color_hex(C_TEXT), 0);
+  lv_obj_set_style_text_font(wifiSetupLbl, &lv_font_montserrat_16, 0);
+  lv_obj_center(wifiSetupLbl);
+  lv_obj_add_event_cb(sb, [](lv_event_t *) {
+    if (wifiSetupArmedAt && millis() - wifiSetupArmedAt < 5000) {
+      wifiSetupArmedAt = 0; lv_label_set_text(wifiSetupLbl, "SETUP");
+      enterPortal();
+    } else {
+      wifiSetupArmedAt = millis(); lv_label_set_text(wifiSetupLbl, "SURE?");
+    }
+  }, LV_EVENT_CLICKED, NULL);
 
   // SignalK card (slim)
   lv_obj_t *cs = card(tile, 24, 168, 432, 104, "SignalK data");
@@ -717,12 +765,18 @@ static void updateSysInfo() {
   if (!sysWifiInfo) return;
   char b[80];
   if (WiFi.status() == WL_CONNECTED)
-    snprintf(b, sizeof(b), "%s   %s   %ld dBm", WIFI_SSID, WiFi.localIP().toString().c_str(), (long)WiFi.RSSI());
+    snprintf(b, sizeof(b), "%s   %s   %ld dBm", cfgSsid, WiFi.localIP().toString().c_str(), (long)WiFi.RSSI());
   else
-    snprintf(b, sizeof(b), "%s   (joining...)", WIFI_SSID);
+    snprintf(b, sizeof(b), "%s   (joining...)", cfgSsid[0] ? cfgSsid : "(not configured)");
   lv_label_set_text(sysWifiInfo, b);
-  snprintf(b, sizeof(b), "%s : %d", SK_HOST, SK_PORT);
+  if (skStarted)           snprintf(b, sizeof(b), "%s : %u", skHostRes, skPortRes);
+  else if (cfgSkHost[0])   snprintf(b, sizeof(b), "%s : %u   (connecting)", cfgSkHost, cfgSkPort);
+  else                     snprintf(b, sizeof(b), "searching via mDNS...");
   lv_label_set_text(sysSkInfo, b);
+  // disarm a stale SURE? on the setup button
+  if (wifiSetupLbl && wifiSetupArmedAt && millis() - wifiSetupArmedAt > 5000) {
+    wifiSetupArmedAt = 0; lv_label_set_text(wifiSetupLbl, "SETUP");
+  }
 }
 
 static void updateDots() {
@@ -1108,6 +1162,66 @@ static void wsEvent(WStype_t type, uint8_t *payload, size_t len) {
     default: break;
   }
 }
+// SignalK server resolution: manual host from config if set, else mDNS browse
+// for _signalk-http._tcp once WiFi is up. skBegin is called exactly once.
+static void skBegin(const char *h, uint16_t port) {
+  strlcpy(skHostRes, h, sizeof(skHostRes)); skPortRes = port;
+  ws.begin(skHostRes, skPortRes, SK_PATH);
+  ws.onEvent(wsEvent); ws.setReconnectInterval(3000);
+  skStarted = true;
+  Serial.printf("[sk] -> ws://%s:%u%s\n", skHostRes, skPortRes, SK_PATH);
+  updateSysInfo();
+}
+
+// ---------------- Onboarding portal (on-screen page + state machine) ----------------
+static lv_obj_t *portalPage = nullptr, *portalStatus = nullptr;
+static void showPortalUI() {
+  if (portalPage) { lv_obj_clear_flag(portalPage, LV_OBJ_FLAG_HIDDEN); return; }
+  portalPage = lv_obj_create(lv_layer_top());   // covers everything, eats input
+  lv_obj_set_size(portalPage, 480, 480); lv_obj_set_pos(portalPage, 0, 0);
+  lv_obj_set_style_bg_color(portalPage, lv_color_hex(C_BG), 0);
+  lv_obj_set_style_bg_opa(portalPage, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(portalPage, 0, 0);
+  lv_obj_set_style_radius(portalPage, 0, 0);
+  lv_obj_clear_flag(portalPage, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *t = lv_label_create(portalPage);
+  lv_label_set_text(t, "WiFi SETUP");
+  lv_obj_set_style_text_color(t, lv_color_hex(C_ACCENT), 0);
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_36, 0);
+  lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 14);
+  lv_obj_t *qr = lv_qrcode_create(portalPage, 180, lv_color_hex(0x000000), lv_color_hex(0xFFFFFF));
+  char qrs[48]; snprintf(qrs, sizeof(qrs), "WIFI:T:nopass;S:%s;;", portalApName());
+  lv_qrcode_update(qr, qrs, strlen(qrs));
+  lv_obj_align(qr, LV_ALIGN_TOP_MID, 0, 66);
+  dimLbl(portalPage, "1)  Point your phone camera here, or join WiFi:", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 262);
+  lv_obj_t *ap = lv_label_create(portalPage);
+  lv_label_set_text(ap, portalApName());
+  lv_obj_set_style_text_color(ap, lv_color_hex(C_TEXT), 0);
+  lv_obj_set_style_text_font(ap, &lv_font_montserrat_28, 0);
+  lv_obj_align(ap, LV_ALIGN_TOP_MID, 0, 286);
+  dimLbl(portalPage, "2)  The setup page opens by itself", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 330);
+  dimLbl(portalPage, "(or browse to 192.168.4.1)", &lv_font_montserrat_14, LV_ALIGN_TOP_MID, 0, 354);
+  portalStatus = lv_label_create(portalPage);
+  lv_label_set_text(portalStatus, "waiting for a phone to join...");
+  lv_obj_set_style_text_color(portalStatus, lv_color_hex(C_ACCENT), 0);
+  lv_obj_set_style_text_font(portalStatus, &lv_font_montserrat_20, 0);
+  lv_obj_align(portalStatus, LV_ALIGN_BOTTOM_MID, 0, -22);
+}
+static void enterPortal() {
+  if (runMode == RM_PORTAL) return;
+  runMode = RM_PORTAL;
+  portalStart();
+  if (cfgSsid[0]) WiFi.begin(cfgSsid, cfgPass);   // keep retrying the saved net in background
+  showPortalUI();
+  applyBacklight();
+  Serial.println("[portal] entered setup mode");
+}
+static void exitPortal() {
+  portalStop();
+  if (portalPage) lv_obj_add_flag(portalPage, LV_OBJ_FLAG_HIDDEN);
+  runMode = RM_NORMAL;
+  Serial.println("[portal] exited (WiFi came up)");
+}
 
 void setup() {
   Serial.begin(115200); delay(800);
@@ -1115,6 +1229,7 @@ void setup() {
   prefs.begin("gauge", false);
   dispMode = prefs.getUChar("dmode", DM_DAY) & 3;
   wakeUntil = millis() + 60000;   // booting in SLEEP: stay lit a minute
+  loadConfig();
   Wire.begin(15, 7);
   expanderInit();     // CH32V003: all outputs HIGH (release LCD/touch resets), backlight on, buzzer off
   delay(200);
@@ -1127,6 +1242,15 @@ void setup() {
   if (gtAddr) touchOK = touch.begin(Wire, gtAddr, 15, 7);
   if (touchOK) touch.setMaxTouchPoint(1);
   Serial.printf("GT911 %s (addr 0x%02X)\n", touchOK ? "ok" : "FAILED", gtAddr);
+  // dead-man's switch: finger held on the glass while powering up -> setup portal
+  bool bootSetup = false;
+  if (touchOK) {
+    uint32_t t0 = millis();
+    while (millis() - t0 < 500) {
+      if (touch.getPoint(tpx, tpy, 1) > 0) { bootSetup = true; break; }
+      delay(40);
+    }
+  }
 
   gfx->begin();
   W = gfx->width(); H = gfx->height();
@@ -1145,8 +1269,12 @@ void setup() {
   esp_timer_handle_t t; esp_timer_create(&ta, &t); esp_timer_start_periodic(t, TICK_MS * 1000);
 
   buildUI();
-  WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASS);
-  ws.begin(SK_HOST, SK_PORT, SK_PATH); ws.onEvent(wsEvent); ws.setReconnectInterval(3000);
+  if (!cfgSsid[0] || bootSetup) {
+    enterPortal();               // nothing configured (or finger held at boot)
+  } else {
+    WiFi.mode(WIFI_STA); WiFi.begin(cfgSsid, cfgPass);
+  }
+  // SignalK connect happens in loop() once WiFi is up (manual host or mDNS discovery)
   buzzer(true); delay(150); buzzer(false);   // short boot beep so you know it powered up
   Serial.println("setup done");
 }
@@ -1162,10 +1290,44 @@ void loop() {
   // Safety net for runtime drift: whatever slips between event-driven resyncs
   // gets realigned within 2 minutes.
   if (millis() - lastResync > 120000) fbResync("periodic");
+  // --- onboarding portal state machine ---
+  static bool wifiEverUp = false;
+  if (runMode == RM_PORTAL) {
+    portalLoop();
+    static uint32_t rebootAt = 0, lastPst = 0;
+    if (portalSaved() && !rebootAt) rebootAt = millis() + 2500;  // let the phone render the "saved" page
+    if (rebootAt && millis() > rebootAt) ESP.restart();
+    if (millis() - lastPst > 500 && portalStatus) {
+      lastPst = millis();
+      if (portalSaved()) setTxt(portalStatus, "Saved!  Rebooting...");
+      else if (portalClients() > 0) setTxt(portalStatus, "phone connected - follow the page there");
+      else setTxt(portalStatus, "waiting for a phone to join...");
+    }
+    // saved WiFi came back while we sat in setup (transient outage) -> resume
+    if (!portalSaved() && WiFi.status() == WL_CONNECTED) exitPortal();
+  } else if (!wifiEverUp && cfgSsid[0] && millis() > 45000) {
+    // configured but never connected this boot (moved boats? typo?) -> offer setup
+    enterPortal();
+  }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
-    if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
-    ws.loop();
+    if (!up) { up = true; wifiEverUp = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
+    // --- SignalK: manual host, or discover via mDNS ---
+    if (!skStarted && runMode == RM_NORMAL) {
+      static uint32_t lastSkTry = 0;
+      if (lastSkTry == 0 || millis() - lastSkTry > 15000) {
+        lastSkTry = millis();
+        if (cfgSkHost[0]) skBegin(cfgSkHost, cfgSkPort);
+        else {
+          static bool mdnsUp = false;
+          if (!mdnsUp) mdnsUp = MDNS.begin("gauge");   // we also become gauge.local
+          int n = MDNS.queryService("signalk-http", "tcp");   // blocks ~3s
+          if (n > 0) skBegin(MDNS.address(0).toString().c_str(), MDNS.port(0));
+          else { Serial.println("[sk] mDNS: no SignalK server found yet"); updateSysInfo(); }
+        }
+      }
+    }
+    if (skStarted) ws.loop();
   } else if (up) { up = false; setWifi(false); }
   static uint32_t lastUI = 0;
   // Hold data-driven repaints while a finger is down: the wind page's compass

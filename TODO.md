@@ -6,11 +6,12 @@
 
 ## 🚢 Make it distributable (others flash it onto their boats)
 
-- [ ] **WiFi provisioning — captive portal.** On first boot (or long-press reset gesture),
-      gauge starts its own AP (`SignalK-Gauge-XXXX`); user joins from a phone, a captive
-      portal asks for their WiFi + SignalK server address; saved to NVS; reboot & connect.
-      Candidate: WiFiManager (tzapu) or ESPAsyncWebServer + DNS captive portal.
-      Kills `secrets.h` — no recompile for end users. **(biggest blocker for sharing)**
+- [x] **WiFi provisioning — captive portal** (done 2026-07-03). Open AP `Gauge-XXXX` +
+      wildcard DNS + phone portal (scan list, password, SignalK manual-or-auto); on-screen
+      setup page with join-my-AP QR code; SignalK auto-discovery via mDNS (`_signalk-http`);
+      config in NVS, secrets.h now only a dev seed. Entry: no config / SETUP button on
+      System page (two-tap) / finger held at power-on / WiFi never up 45 s after boot.
+      Still open: field-test on a phone, and `secrets.h.example` before repo goes public.
 - [ ] **On-device settings page.** Web UI at the gauge's IP once on the network:
       SignalK host/port, units (ft/m, °F/°C, kn), brightness, alarm thresholds.
       Persist to NVS (`Preferences`). Same web stack as the captive portal.
