@@ -1237,8 +1237,10 @@ static void enterPortal() {
   if (runMode == RM_PORTAL) return;
   runMode = RM_PORTAL;
   portalStart();
-  if (portalStaRetry && cfgSsid[0]) WiFi.begin(cfgSsid, cfgPass);  // failure entry: keep retrying behind the AP
-  else WiFi.disconnect();   // deliberate entry: drop STA so we don't insta-exit on "still connected"
+  // ALWAYS stop the STA side: continuous join retries drag the shared radio
+  // across channels and make our AP unjoinable (phones see it but can't stick).
+  // The saved network is retried GENTLY from the portal loop instead.
+  WiFi.disconnect();
   showPortalUI();
   applyBacklight();
   Serial.println("[portal] entered setup mode");
@@ -1335,6 +1337,14 @@ void loop() {
       if (portalSaved()) setTxt(portalStatus, "Saved!  Rebooting...");
       else if (portalClients() > 0) setTxt(portalStatus, "phone connected - follow the page there");
       else setTxt(portalStatus, "waiting for a phone to join...");
+    }
+    // Gentle background retry of the saved network (failure entry only): one
+    // ~8s join attempt per minute, radio quiet in between so the AP stays
+    // rock-solid for the phone. If the network reappears, resume normally.
+    if (portalStaRetry && cfgSsid[0] && !portalSaved()) {
+      static uint32_t tryAt = 0; static bool trying = false;
+      if (!trying && millis() - tryAt > 60000) { tryAt = millis(); trying = true; WiFi.begin(cfgSsid, cfgPass); }
+      if (trying && millis() - tryAt > 8000 && WiFi.status() != WL_CONNECTED) { trying = false; WiFi.disconnect(); }
     }
     // saved WiFi came back while we sat in FAILURE-entered setup -> resume normal
     if (portalStaRetry && !portalSaved() && WiFi.status() == WL_CONNECTED) exitPortal();
