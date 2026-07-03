@@ -33,9 +33,9 @@
 
 - [ ] **Plugin-agnostic anchored detection** (y2k publishes `navigation.anchor.state`;
       the classic plugin signals via `navigation.anchor.position` existing — accept either).
-- [ ] **Staleness watchdog.** If anchor/position data stops updating while anchored
-      (GPS loss, plugin crash, WiFi drop), show a dim STALE warning + chirp. A silent
-      failure must never look like "all is well" at 3am.
+- [x] **Staleness watchdog** (done 2026-07-03). Anchored + no position/radius delta for
+      30s -> status "STALE Ns" yellow with age counting, plot greys + STALE DATA stamp,
+      double-chirp every 30s (drag pulse takes priority). Self-clears when data resumes.
 - [ ] **Subscribe y2k's extra alarms:** `notifications.environment.wind.speed`,
       `wind.directionChange`, `ais.proximity` → distinct buzzer cadences + status lines.
 - [ ] **`alert` notification state → yellow** (pre-warning stage before alarm/emergency).

@@ -84,6 +84,7 @@ static esp_lcd_panel_handle_t panelHandle = nullptr;
 // (rolled image, top lines wrapped to the bottom) whenever the bounce-buffer
 // refill missed a deadline and the picture slipped. Brief flicker per call.
 static uint32_t lastResync = 0;
+static uint32_t resyncAt = 0;   // schedule a one-shot resync (0 = none pending)
 static void fbResync(const char *why) {
   if (!panelHandle) return;
   lastResync = millis();
@@ -243,6 +244,15 @@ static lv_obj_t *anchorPlot, *aWindLbl, *aGustLbl, *aDepthLbl, *aSwingLbl;
 static lv_color_t *anchorPlotBuf;
 static float trailXs[90], trailYs[90]; static int trailN = 0;  // 10s samples = 15 min swing trail (m, E/N of anchor)
 static float maxSwing = 0;                                     // largest distance from anchor seen this set (m)
+// Staleness watchdog: while anchored, GPS position (~2s) and anchor radius
+// (~1s) must keep arriving. Silence = the gauge is blind = alarm-worthy.
+static uint32_t lastPosMs = 0, lastAnchorMs = 0;
+static bool anchorStale() {
+  if (strcmp(boat.anchorOn, "on")) return false;
+  uint32_t newest = lastPosMs > lastAnchorMs ? lastPosMs : lastAnchorMs;
+  if (newest == 0) return millis() > 60000;   // anchored but never any data: grace, then stale
+  return millis() - newest > 30000;
+}
 // weather page
 static lv_obj_t *baroArc, *baroValLbl, *baroTrendLbl, *baroChart;
 static lv_chart_series_t *baroSer;
@@ -529,6 +539,7 @@ static void drawAnchorPlot() {
   lv_canvas_fill_bg(anchorPlot, lv_color_hex(0x0A1018), LV_OPA_COVER);
   bool drag = (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius) ||
               !strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency");
+  bool stale = anchorStale();   // frozen data must not look like a calm boat
   float dx = 0, dy = 0; bool rel = anchorRel(&dx, &dy);
   float dist = rel ? sqrtf(dx * dx + dy * dy) : 0;
   float R = 8;                                   // meters shown from center to rim (auto-zoom)
@@ -537,7 +548,7 @@ static void drawAnchorPlot() {
   float sc = 130.0f / R;
   if (!isnan(boat.anchorMaxRadius)) {            // alarm boundary ring
     lv_draw_arc_dsc_t ad; lv_draw_arc_dsc_init(&ad);
-    ad.color = lv_color_hex(drag ? C_RED : C_GREEN); ad.width = 2;
+    ad.color = lv_color_hex(stale ? 0x546E7A : (drag ? C_RED : C_GREEN)); ad.width = 2;
     lv_canvas_draw_arc(anchorPlot, 150, 150, (lv_coord_t)(boat.anchorMaxRadius * sc), 0, 360, &ad);
   }
   lv_draw_label_dsc_t nd; lv_draw_label_dsc_init(&nd);
@@ -555,10 +566,15 @@ static void drawAnchorPlot() {
     int x = 150 + (int)(trailXs[i] * sc), y = 150 - (int)(trailYs[i] * sc);
     if (x >= 2 && x < 298 && y >= 2 && y < 298) lv_canvas_draw_rect(anchorPlot, x - 1, y - 1, 3, 3, &td);
   }
+  if (stale) {                                         // stamp the plot itself
+    lv_draw_label_dsc_t sd; lv_draw_label_dsc_init(&sd);
+    sd.color = lv_color_hex(C_YELLOW); sd.font = &lv_font_montserrat_22;
+    lv_canvas_draw_text(anchorPlot, 90, 24, 120, &sd, "STALE DATA");
+  }
   if (rel) {                                           // the boat, with a heading tick
     int bx = 150 + (int)(dx * sc), by = 150 - (int)(dy * sc);
     lv_draw_rect_dsc_t bd; lv_draw_rect_dsc_init(&bd);
-    bd.bg_color = lv_color_hex(C_ACCENT); bd.bg_opa = LV_OPA_COVER;
+    bd.bg_color = lv_color_hex(stale ? 0x546E7A : C_ACCENT); bd.bg_opa = LV_OPA_COVER;
     bd.radius = LV_RADIUS_CIRCLE; bd.border_width = 0;
     lv_canvas_draw_rect(anchorPlot, bx - 4, by - 4, 9, 9, &bd);
     if (!isnan(boat.heading)) {
@@ -1018,8 +1034,15 @@ static void updateUI() {
     bool radDrag = (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius);
     bool drag = radDrag || !strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency");
     bool anchored = !strcmp(boat.anchorOn, "on");
+    bool stale = anchorStale();
+    static char staleTxt[24];
     const char *txt; uint32_t col;
     if (drag)              { txt = "DRAGGING!";     col = C_RED; }
+    else if (stale) {       // blind while anchored — as loud as the page gets short of dragging
+      uint32_t newest = lastPosMs > lastAnchorMs ? lastPosMs : lastAnchorMs;
+      snprintf(staleTxt, sizeof(staleTxt), "STALE  %lus", newest ? (millis() - newest) / 1000 : millis() / 1000);
+      txt = staleTxt; col = C_YELLOW;
+    }
     else if (anchored)     { txt = "ANCHORED";      col = C_GREEN; }
     else if (boat.seenY2k) { txt = "NOT ANCHORED";  col = C_DIM; }
     else                   { txt = "NO Y2K PLUGIN"; col = C_DIM; }
@@ -1122,7 +1145,7 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.solar.278.panelPower")) boat.solarW = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
-  else if (!strcmp(p, "navigation.position")) { boat.lat = v["latitude"].as<double>(); boat.lon = v["longitude"].as<double>(); }
+  else if (!strcmp(p, "navigation.position")) { boat.lat = v["latitude"].as<double>(); boat.lon = v["longitude"].as<double>(); lastPosMs = millis(); }
   else if (!strcmp(p, "navigation.datetime")) {   // GPS UTC, for the AUTO sun calc
     const char *s = v.as<const char *>();
     int Y, M, D, h, m; float sec;
@@ -1138,7 +1161,7 @@ static void applyDelta(const char *p, JsonVariantConst v) {
     boat.anchorLat = v["latitude"].as<double>(); boat.anchorLon = v["longitude"].as<double>();
   }
   else if (!strcmp(p, "navigation.anchor.state")) { boat.seenY2k = true; const char *s = v.as<const char *>(); if (s) strlcpy(boat.anchorOn, s, sizeof(boat.anchorOn)); }
-  else if (!strcmp(p, "navigation.anchor.currentRadius")) { boat.seenY2k = true; boat.anchorRadius = v.as<float>(); }
+  else if (!strcmp(p, "navigation.anchor.currentRadius")) { boat.seenY2k = true; boat.anchorRadius = v.as<float>(); lastAnchorMs = millis(); }
   else if (!strcmp(p, "navigation.anchor.maxRadius")) { boat.seenY2k = true; boat.anchorMaxRadius = v.as<float>(); }
   else if (!strcmp(p, "notifications.navigation.anchor")) {
     boat.seenY2k = true;
@@ -1158,7 +1181,7 @@ static void onWsText(uint8_t *payload, size_t len) {
 }
 static void wsEvent(WStype_t type, uint8_t *payload, size_t len) {
   switch (type) {
-    case WStype_CONNECTED:    setSk(true);  sendSubscription(); break;
+    case WStype_CONNECTED:    setSk(true);  sendSubscription(); resyncAt = millis() + 2000; break;
     case WStype_DISCONNECTED: setSk(false); break;
     case WStype_TEXT:         onWsText(payload, len); break;
     default: break;
@@ -1290,10 +1313,13 @@ void loop() {
   // Scan-out resync to clear the boot vertical offset (GDMA starts mid-frame on a
   // cold boot). Fire a few times in the first few seconds — a single one didn't
   // clear it on a true cold boot, repeating does. Each is a brief flicker.
-  static int fbResyncs = 0;
-  if (fbResyncs < 4 && millis() > 800 && millis() - lastResync > 900) {
-    fbResyncs++; fbResync("boot");
+  // Boot window widened to ~16s: WiFi join, mDNS discovery, and the WS
+  // subscription burst all land in the first ~10s and each can slip the panel.
+  if (millis() < 16000 && millis() > 800 && millis() - lastResync > 2000) {
+    fbResync("boot");
   }
+  // event-scheduled resync (set on WiFi/SK connect — after their traffic burst)
+  if (resyncAt && millis() > resyncAt) { resyncAt = 0; fbResync("event"); }
   // Safety net for runtime drift: whatever slips between event-driven resyncs
   // gets realigned within 2 minutes.
   if (millis() - lastResync > 120000) fbResync("periodic");
@@ -1319,7 +1345,7 @@ void loop() {
   }
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
-    if (!up) { up = true; wifiEverUp = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
+    if (!up) { up = true; wifiEverUp = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); resyncAt = millis() + 1500; }
     // --- SignalK: manual host, or discover via mDNS ---
     if (!skStarted && runMode == RM_NORMAL) {
       static uint32_t lastSkTry = 0;
@@ -1415,6 +1441,26 @@ void loop() {
     if (dragging) {
       if (millis() - beepAt > 350) { beepAt = millis(); alarmOn = !alarmOn; buzzer(alarmOn); }
     } else if (alarmOn) { alarmOn = false; buzzer(false); }
+    // Staleness watchdog: double-chirp every 30s while blind at anchor ("check
+    // me" — distinct from the continuous drag pulse, which takes priority).
+    static uint32_t chirpAt = 0; static int chirpStep = -1; static uint32_t chirpT = 0;
+    bool stale = !dragging && anchorStale();
+    if (stale && chirpStep < 0 && millis() - chirpAt > 30000) { chirpAt = millis(); chirpStep = 0; chirpT = 0; }
+    if (!stale && chirpStep >= 0) { chirpStep = -1; buzzer(false); }
+    if (chirpStep >= 0 && millis() - chirpT > 130) {
+      chirpT = millis();
+      buzzer(chirpStep % 2 == 0);          // on,off,on,off
+      if (++chirpStep > 3) { chirpStep = -1; buzzer(false); }
+    }
+    // data-driven UI updates stop when data stops — tick the page so the STALE
+    // age keeps counting and the state flips without any incoming delta
+    static uint32_t staleTick = 0; static bool wasStale = false;
+    if (millis() - staleTick > 2000) {
+      staleTick = millis();
+      bool s = anchorStale();
+      if (s || s != wasStale) dataDirty = true;
+      wasStale = s;
+    }
   }
   // Display modes: a touch while sleeping lights the screen for 20s; the
   // backlight setter is change-guarded so calling every pass is free.
