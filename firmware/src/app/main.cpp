@@ -1229,6 +1229,9 @@ void setup() {
   Serial.begin(115200); delay(800);
   Serial.println("\n\n=== BIJOUX gauge boot ===");
   prefs.begin("gauge", false);
+  // one-time config reset (bad creds were saved during portal testing 2026-07-03);
+  // bump the version to wipe again after a breaking config change
+  if (prefs.getUChar("cfgv", 0) < 1) { prefs.clear(); prefs.putUChar("cfgv", 1); Serial.println("[cfg] wiped (version bump)"); }
   dispMode = prefs.getUChar("dmode", DM_DAY) & 3;
   wakeUntil = millis() + 60000;   // booting in SLEEP: stay lit a minute
   loadConfig();
@@ -1318,7 +1321,7 @@ void loop() {
     // --- SignalK: manual host, or discover via mDNS ---
     if (!skStarted && runMode == RM_NORMAL) {
       static uint32_t lastSkTry = 0;
-      if (lastSkTry == 0 || millis() - lastSkTry > 15000) {
+      if (lastSkTry == 0 || millis() - lastSkTry > 30000) {
         lastSkTry = millis();
         if (cfgSkHost[0]) skBegin(cfgSkHost, cfgSkPort);
         else {
@@ -1327,6 +1330,7 @@ void loop() {
           int n = MDNS.queryService("signalk-http", "tcp");   // blocks ~3s
           if (n > 0) skBegin(MDNS.address(0).toString().c_str(), MDNS.port(0));
           else { Serial.println("[sk] mDNS: no SignalK server found yet"); updateSysInfo(); }
+          fbResync("mdns");   // the blocking query starves the scan-out — realign
         }
       }
     }

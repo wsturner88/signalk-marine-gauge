@@ -40,12 +40,12 @@ static String pageHtml() {
   s += F("<p style='text-align:right'><a href='/r'>rescan &#8635;</a></p>"
          "<form method='POST' action='/save'>"
          "<label>WiFi network</label><input id='s' name='s' required>"
-         "<label>Password</label><input name='p' type='password'>"
-         "<label><input class='ck' type='checkbox' name='a' checked onchange=\"document.getElementById('m').style.display=this.checked?'none':'block'\">"
-         "Find the SignalK server automatically</label>"
-         "<div id='m' style='display:none'><label>SignalK server address</label>"
-         "<input name='h' placeholder='192.168.8.96'>"
-         "<label>Port</label><input name='o' type='number' value='80'></div>"
+         "<label>WiFi password &mdash; type carefully, it is not verified until after save</label>"
+         "<input name='p' type='password'>"
+         "<label>SignalK server &mdash; leave EMPTY to find it automatically</label>"
+         "<input name='h' placeholder='automatic (recommended)'>"
+         "<label>SignalK port (only if server set above)</label>"
+         "<input name='o' type='number' value='80'>"
          "<button>Save &amp; Connect</button></form>"
          "<script>document.querySelectorAll('.n').forEach(function(e){e.onclick=function(){document.getElementById('s').value=e.dataset.s}})</script>"
          "</body></html>");
@@ -76,8 +76,7 @@ static void buildNets() {
 
 static void handleSave() {
   String ssid = http.arg("s"), pass = http.arg("p");
-  bool autoSk = http.arg("a") == "on";
-  String host = autoSk ? "" : http.arg("h");
+  String host = http.arg("h"); host.trim();   // empty = auto-discover via mDNS
   uint16_t port = (uint16_t)http.arg("o").toInt(); if (!port) port = 80;
   prefs.putString("ssid", ssid);
   prefs.putString("pass", pass);
