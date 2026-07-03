@@ -37,8 +37,8 @@
 - [ ] **`alert` notification state → yellow** (pre-warning stage before alarm/emergency).
 - [ ] **Buttons → SignalK (PUT):** DROP / RAISE anchor via y2k, SILENCE ALARM (ack the
       notification). Makes the gauge a full anchor station, not just a display.
-- [ ] Top-down "boat on a tether" plot: drop point + swing circle + position track
-      (feasible now that rendering is cheap).
+- [x] Top-down "boat on a tether" plot: drop point + swing circle + 15-min position
+      trail + boat/heading + wind arrow, with stats column (done 2026-07-03).
 - [ ] Decide y2k vs classic signalk-anchoralarm-plugin (leaning y2k: wind/AIS extras).
       Never run both at once.
 

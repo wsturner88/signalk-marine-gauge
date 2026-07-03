@@ -107,6 +107,9 @@ struct Boat {
   float anchorRadius = NAN, anchorMaxRadius = NAN;   // m (from y2k-anchor-alarm)
   char  anchorOn[8] = "";                            // navigation.anchor.state: "on"/"off"
   char  anchorState[16] = "";                        // notification state: normal/alert/alarm/emergency
+  double lat = NAN, lon = NAN;                       // navigation.position (double: float loses ~0.5m)
+  double anchorLat = NAN, anchorLon = NAN;           // navigation.anchor.position
+  bool  seenY2k = false;                             // any anchor-plugin path received
   float battSoc = NAN, battV = NAN, battA = NAN, battW = NAN;
   float fuel = NAN, cabinTemp = NAN;
   float waterPort = NAN, waterStbd = NAN, waterAft = NAN;
@@ -141,6 +144,10 @@ static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yield
 static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
 // anchor page
 static lv_obj_t *anchorStateLbl, *anchorRangeLbl, *anchorBar;
+static lv_obj_t *anchorPlot, *aWindLbl, *aGustLbl, *aDepthLbl, *aSwingLbl;
+static lv_color_t *anchorPlotBuf;
+static float trailXs[90], trailYs[90]; static int trailN = 0;  // 10s samples = 15 min swing trail (m, E/N of anchor)
+static float maxSwing = 0;                                     // largest distance from anchor seen this set (m)
 // weather page
 static lv_obj_t *baroArc, *baroValLbl, *baroTrendLbl, *baroChart;
 static lv_chart_series_t *baroSer;
@@ -407,27 +414,118 @@ static void buildPower(lv_obj_t *tile) {
 // Shows the anchor alarm state + swing range vs the max-set radius; the loop()
 // sounds the buzzer when the plugin reports a drag. "test alarm" button confirms sound.
 static void anchorTestCb(lv_event_t *) { buzzer(true); delay(400); buzzer(false); }
+// boat position in meters east/north of the anchor drop (equirectangular — fine at swing scale)
+static bool anchorRel(float *dxE, float *dyN) {
+  if (isnan(boat.lat) || isnan(boat.anchorLat)) return false;
+  float k = cosf((float)boat.anchorLat * 0.0174533f);
+  *dxE = (float)((boat.lon - boat.anchorLon) * 111320.0) * k;
+  *dyN = (float)((boat.lat - boat.anchorLat) * 111320.0);
+  return true;
+}
+// Top-down swing plot (north-up): anchor cross at center, alarm ring, 15-min
+// position trail, boat dot + heading tick, wind arrow on the rim (direction
+// the wind blows FROM). Redrawn ~1/s in loop() while the page is visible.
+static void drawAnchorPlot() {
+  if (!anchorPlotBuf) return;
+  lv_canvas_fill_bg(anchorPlot, lv_color_hex(0x0A1018), LV_OPA_COVER);
+  bool drag = (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius) ||
+              !strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency");
+  float dx = 0, dy = 0; bool rel = anchorRel(&dx, &dy);
+  float dist = rel ? sqrtf(dx * dx + dy * dy) : 0;
+  float R = 8;                                   // meters shown from center to rim (auto-zoom)
+  if (!isnan(boat.anchorMaxRadius)) R = fmaxf(R, boat.anchorMaxRadius);
+  R = fmaxf(fmaxf(R, dist), maxSwing);
+  float sc = 130.0f / R;
+  if (!isnan(boat.anchorMaxRadius)) {            // alarm boundary ring
+    lv_draw_arc_dsc_t ad; lv_draw_arc_dsc_init(&ad);
+    ad.color = lv_color_hex(drag ? C_RED : C_GREEN); ad.width = 2;
+    lv_canvas_draw_arc(anchorPlot, 150, 150, (lv_coord_t)(boat.anchorMaxRadius * sc), 0, 360, &ad);
+  }
+  lv_draw_label_dsc_t nd; lv_draw_label_dsc_init(&nd);
+  nd.color = lv_color_hex(C_DIM); nd.font = &lv_font_montserrat_14;
+  lv_canvas_draw_text(anchorPlot, 143, 2, 20, &nd, "N");
+  lv_draw_line_dsc_t cd; lv_draw_line_dsc_init(&cd);   // anchor drop = cross
+  cd.color = lv_color_hex(C_TEXT); cd.width = 2;
+  lv_point_t ch[] = {{142, 150}, {158, 150}}, cv[] = {{150, 142}, {150, 158}};
+  lv_canvas_draw_line(anchorPlot, ch, 2, &cd);
+  lv_canvas_draw_line(anchorPlot, cv, 2, &cd);
+  lv_draw_rect_dsc_t td; lv_draw_rect_dsc_init(&td);   // swing trail dots
+  td.bg_color = lv_color_hex(0x33627A); td.bg_opa = LV_OPA_COVER;
+  td.radius = LV_RADIUS_CIRCLE; td.border_width = 0;
+  for (int i = 0; i < trailN; i++) {
+    int x = 150 + (int)(trailXs[i] * sc), y = 150 - (int)(trailYs[i] * sc);
+    if (x >= 2 && x < 298 && y >= 2 && y < 298) lv_canvas_draw_rect(anchorPlot, x - 1, y - 1, 3, 3, &td);
+  }
+  if (rel) {                                           // the boat, with a heading tick
+    int bx = 150 + (int)(dx * sc), by = 150 - (int)(dy * sc);
+    lv_draw_rect_dsc_t bd; lv_draw_rect_dsc_init(&bd);
+    bd.bg_color = lv_color_hex(C_ACCENT); bd.bg_opa = LV_OPA_COVER;
+    bd.radius = LV_RADIUS_CIRCLE; bd.border_width = 0;
+    lv_canvas_draw_rect(anchorPlot, bx - 4, by - 4, 9, 9, &bd);
+    if (!isnan(boat.heading)) {
+      lv_point_t hl[] = {{(lv_coord_t)bx, (lv_coord_t)by},
+                         {(lv_coord_t)(bx + sinf(boat.heading) * 14), (lv_coord_t)(by - cosf(boat.heading) * 14)}};
+      lv_draw_line_dsc_t hd; lv_draw_line_dsc_init(&hd);
+      hd.color = lv_color_hex(C_ACCENT); hd.width = 3; hd.round_end = 1;
+      lv_canvas_draw_line(anchorPlot, hl, 2, &hd);
+    }
+  }
+  if (!isnan(boat.windAngleAppAvg) && !isnan(boat.heading)) {   // wind arrow at the rim
+    float wd = boat.heading + boat.windAngleAppAvg;             // compass direction wind comes FROM
+    float wx = sinf(wd), wy = -cosf(wd), px = cosf(wd), py = sinf(wd);
+    lv_draw_line_dsc_t wl; lv_draw_line_dsc_init(&wl);
+    wl.color = lv_color_hex(C_YELLOW); wl.width = 4; wl.round_end = 1; wl.round_start = 1;
+    lv_point_t sh[] = {{(lv_coord_t)(150 + wx * 146), (lv_coord_t)(150 + wy * 146)},
+                       {(lv_coord_t)(150 + wx * 118), (lv_coord_t)(150 + wy * 118)}};
+    lv_canvas_draw_line(anchorPlot, sh, 2, &wl);
+    lv_point_t t1[] = {{(lv_coord_t)(150 + wx * 118), (lv_coord_t)(150 + wy * 118)},
+                       {(lv_coord_t)(150 + wx * 131 + px * 6), (lv_coord_t)(150 + wy * 131 + py * 6)}};
+    lv_point_t t2[] = {{(lv_coord_t)(150 + wx * 118), (lv_coord_t)(150 + wy * 118)},
+                       {(lv_coord_t)(150 + wx * 131 - px * 6), (lv_coord_t)(150 + wy * 131 - py * 6)}};
+    lv_canvas_draw_line(anchorPlot, t1, 2, &wl);
+    lv_canvas_draw_line(anchorPlot, t2, 2, &wl);
+  }
+}
+
 static void buildAnchor(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
-  titleLabel(tile, "ANCHOR");
-  anchorStateLbl = centerNum(tile, &lv_font_montserrat_48, LV_ALIGN_CENTER, 0, -72);
-  lv_label_set_text(anchorStateLbl, "NO ANCHOR");
+  // the status IS the page title — big, color-coded
+  anchorStateLbl = centerNum(tile, &lv_font_montserrat_36, LV_ALIGN_TOP_MID, 0, 8);
+  lv_label_set_text(anchorStateLbl, "NO Y2K PLUGIN");
   lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(C_DIM), 0);
-  anchorRangeLbl = centerNum(tile, &lv_font_montserrat_36, LV_ALIGN_CENTER, 0, 0);
-  lv_label_set_text(anchorRangeLbl, "--");
-  dimLbl(tile, "RANGE / MAX  (ft)", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 40);
+
+  anchorPlotBuf = (lv_color_t *)heap_caps_malloc(300 * 300 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  anchorPlot = lv_canvas_create(tile);
+  if (anchorPlotBuf) {
+    lv_canvas_set_buffer(anchorPlot, anchorPlotBuf, 300, 300, LV_IMG_CF_TRUE_COLOR);
+    lv_canvas_fill_bg(anchorPlot, lv_color_hex(0x0A1018), LV_OPA_COVER);
+  }
+  lv_obj_set_pos(anchorPlot, 14, 56);
+
+  const int SX = 326;   // right-hand stats column
+  dimLbl(tile, "RANGE / MAX ft", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, SX, 58);
+  anchorRangeLbl = centerNum(tile, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, SX, 76);
+  dimLbl(tile, "WIND kn", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, SX, 122);
+  aWindLbl = centerNum(tile, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, SX, 140);
+  aGustLbl = dimLbl(tile, "", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, SX + 70, 150);
+  dimLbl(tile, "DEPTH ft", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, SX, 186);
+  aDepthLbl = centerNum(tile, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, SX, 204);
+  dimLbl(tile, "MAX SWING ft", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, SX, 250);
+  aSwingLbl = centerNum(tile, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, SX, 268);
+
   anchorBar = lv_bar_create(tile);
-  lv_obj_set_size(anchorBar, 380, 18);
-  lv_obj_align(anchorBar, LV_ALIGN_CENTER, 0, 78);
+  lv_obj_set_size(anchorBar, 300, 12);
+  lv_obj_set_pos(anchorBar, 14, 366);
   lv_bar_set_range(anchorBar, 0, 100);
   lv_obj_set_style_bg_color(anchorBar, lv_color_hex(0x1E2A38), LV_PART_MAIN);
-  lv_obj_set_style_radius(anchorBar, 9, LV_PART_MAIN);
-  lv_obj_set_style_radius(anchorBar, 9, LV_PART_INDICATOR);
+  lv_obj_set_style_radius(anchorBar, 6, LV_PART_MAIN);
+  lv_obj_set_style_radius(anchorBar, 6, LV_PART_INDICATOR);
   lv_obj_set_style_bg_color(anchorBar, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
-  // discreet "test alarm" button to confirm the buzzer sound
+  // plugin credit + discreet "test alarm" button (clear of the nav buttons)
+  dimLbl(tile, "y2k-anchor-alarm", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, 14, 390);
   lv_obj_t *tb = lv_btn_create(tile);
-  lv_obj_set_size(tb, 120, 38);
-  lv_obj_align(tb, LV_ALIGN_BOTTOM_MID, 0, -48);
+  lv_obj_set_size(tb, 110, 34);
+  lv_obj_align(tb, LV_ALIGN_BOTTOM_RIGHT, -14, -52);
   lv_obj_set_style_bg_color(tb, lv_color_hex(C_CARD), 0);
   lv_obj_set_style_bg_opa(tb, LV_OPA_60, 0);
   lv_obj_set_style_radius(tb, 10, 0);
@@ -753,23 +851,29 @@ static void updateUI() {
     bool drag = radDrag || !strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency");
     bool anchored = !strcmp(boat.anchorOn, "on");
     const char *txt; uint32_t col;
-    if (drag)          { txt = "DRAGGING!"; col = C_RED; }
-    else if (anchored) { txt = "ANCHORED";  col = C_GREEN; }
-    else               { txt = "NO ANCHOR"; col = C_DIM; }
-    lv_label_set_text(anchorStateLbl, txt);
-    lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0);
+    if (drag)              { txt = "DRAGGING!";     col = C_RED; }
+    else if (anchored)     { txt = "ANCHORED";      col = C_GREEN; }
+    else if (boat.seenY2k) { txt = "NOT ANCHORED";  col = C_DIM; }
+    else                   { txt = "NO Y2K PLUGIN"; col = C_DIM; }
+    setTxt(anchorStateLbl, txt);
+    static uint32_t lastACol = 0;
+    if (col != lastACol) { lastACol = col; lv_obj_set_style_text_color(anchorStateLbl, lv_color_hex(col), 0); }
     if (!isnan(boat.anchorMaxRadius)) {
       int cur = isnan(boat.anchorRadius) ? 0 : (int)(boat.anchorRadius * 3.28084f + 0.5f);
       int mx  = (int)(boat.anchorMaxRadius * 3.28084f + 0.5f);
       snprintf(b, sizeof(b), "%d / %d", cur, mx);
-      lv_label_set_text(anchorRangeLbl, b);
+      setTxt(anchorRangeLbl, b);
       int pct = (mx > 0) ? (cur * 100 / mx) : 0; if (pct > 100) pct = 100;
       lv_bar_set_value(anchorBar, pct, LV_ANIM_OFF);
       lv_obj_set_style_bg_color(anchorBar, lv_color_hex(col), LV_PART_INDICATOR);
     } else {
-      lv_label_set_text(anchorRangeLbl, "--");
+      setTxt(anchorRangeLbl, "--");
       lv_bar_set_value(anchorBar, 0, LV_ANIM_OFF);
     }
+    if (!isnan(boat.windSpeedApp)) { snprintf(b, sizeof(b), "%.1f", boat.windSpeedApp * 1.94384f); setTxt(aWindLbl, b); }
+    if (!isnan(boat.gust5m))       { snprintf(b, sizeof(b), "g %.0f", boat.gust5m * 1.94384f);     setTxt(aGustLbl, b); }
+    if (!isnan(boat.depth))        { snprintf(b, sizeof(b), "%.1f", boat.depth * 3.28084f);        setTxt(aDepthLbl, b); }
+    if (maxSwing > 0)              { snprintf(b, sizeof(b), "%d", (int)(maxSwing * 3.28084f + 0.5f)); setTxt(aSwingLbl, b); }
   }
 }
 
@@ -802,6 +906,8 @@ static void sendSubscription() {
     "{\"path\":\"electrical.solar.278.panelPower\",\"period\":2000},"
     "{\"path\":\"electrical.solar.278.yieldToday\",\"period\":5000},"
     "{\"path\":\"electrical.venus.acSource\",\"period\":5000},"
+    "{\"path\":\"navigation.position\",\"period\":2000},"
+    "{\"path\":\"navigation.anchor.position\",\"period\":5000},"
     "{\"path\":\"navigation.anchor.state\",\"period\":2000},"
     "{\"path\":\"navigation.anchor.currentRadius\",\"period\":1000},"
     "{\"path\":\"navigation.anchor.maxRadius\",\"period\":5000},"
@@ -845,10 +951,16 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.solar.278.panelPower")) boat.solarW = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
-  else if (!strcmp(p, "navigation.anchor.state")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.anchorOn, s, sizeof(boat.anchorOn)); }
-  else if (!strcmp(p, "navigation.anchor.currentRadius")) boat.anchorRadius = v.as<float>();
-  else if (!strcmp(p, "navigation.anchor.maxRadius")) boat.anchorMaxRadius = v.as<float>();
+  else if (!strcmp(p, "navigation.position")) { boat.lat = v["latitude"].as<double>(); boat.lon = v["longitude"].as<double>(); }
+  else if (!strcmp(p, "navigation.anchor.position")) {
+    boat.seenY2k = true;
+    boat.anchorLat = v["latitude"].as<double>(); boat.anchorLon = v["longitude"].as<double>();
+  }
+  else if (!strcmp(p, "navigation.anchor.state")) { boat.seenY2k = true; const char *s = v.as<const char *>(); if (s) strlcpy(boat.anchorOn, s, sizeof(boat.anchorOn)); }
+  else if (!strcmp(p, "navigation.anchor.currentRadius")) { boat.seenY2k = true; boat.anchorRadius = v.as<float>(); }
+  else if (!strcmp(p, "navigation.anchor.maxRadius")) { boat.seenY2k = true; boat.anchorMaxRadius = v.as<float>(); }
   else if (!strcmp(p, "notifications.navigation.anchor")) {
+    boat.seenY2k = true;
     const char *s = v["state"].as<const char *>();
     if (s) strlcpy(boat.anchorState, s, sizeof(boat.anchorState));
   }
@@ -970,6 +1082,28 @@ void loop() {
         lv_obj_set_style_text_color(baroTrendLbl, lv_color_hex(c), 0);
       }
     }
+  }
+  // Anchor swing trail: sample position-vs-anchor every 10s while anchored;
+  // track the largest swing. Trail + stats reset on each fresh anchor set.
+  {
+    static uint32_t lastTrail = 0; static bool wasAnchored = false;
+    bool anchored = !strcmp(boat.anchorOn, "on");
+    if (anchored && !wasAnchored) { trailN = 0; maxSwing = 0; }
+    wasAnchored = anchored;
+    float dx, dy;
+    if (anchored && anchorRel(&dx, &dy) && millis() - lastTrail > 10000) {
+      lastTrail = millis();
+      if (trailN < 90) { trailXs[trailN] = dx; trailYs[trailN++] = dy; }
+      else { memmove(trailXs, trailXs + 1, 89 * sizeof(float)); memmove(trailYs, trailYs + 1, 89 * sizeof(float));
+             trailXs[89] = dx; trailYs[89] = dy; }
+      float dist = sqrtf(dx * dx + dy * dy);
+      if (dist > maxSwing) maxSwing = dist;
+    }
+  }
+  // Redraw the swing plot ~1/s, only while the ANCHOR page is visible.
+  {
+    static uint32_t lastPlot = 0;
+    if (curTile == 4 && millis() - lastPlot > 1000) { lastPlot = millis(); drawAnchorPlot(); }
   }
   lv_timer_handler();
   // Anchor drag alarm: pulse the buzzer (~350ms on/off) whenever the y2k plugin
