@@ -1233,14 +1233,12 @@ static void showPortalUI() {
   lv_obj_align(portalStatus, LV_ALIGN_BOTTOM_MID, 0, -22);
 }
 static bool portalStaRetry = false;   // true only when entered because WiFi FAILED
+static uint32_t portalTryAt = 0; static bool portalTrying = false;   // gentle-rejoin state
 static void enterPortal() {
   if (runMode == RM_PORTAL) return;
   runMode = RM_PORTAL;
-  portalStart();
-  // ALWAYS stop the STA side: continuous join retries drag the shared radio
-  // across channels and make our AP unjoinable (phones see it but can't stick).
-  // The saved network is retried GENTLY from the portal loop instead.
-  WiFi.disconnect();
+  portalStart();   // idles the STA itself before scanning; AP stays stable from here on
+  portalTryAt = millis(); portalTrying = false;   // first gentle rejoin no sooner than +60s
   showPortalUI();
   applyBacklight();
   Serial.println("[portal] entered setup mode");
@@ -1339,12 +1337,15 @@ void loop() {
       else setTxt(portalStatus, "waiting for a phone to join...");
     }
     // Gentle background retry of the saved network (failure entry only): one
-    // ~8s join attempt per minute, radio quiet in between so the AP stays
-    // rock-solid for the phone. If the network reappears, resume normally.
+    // ~8s join attempt per minute — and NEVER while a phone is on our AP,
+    // since the shared radio would hiccup the portal page mid-use.
     if (portalStaRetry && cfgSsid[0] && !portalSaved()) {
-      static uint32_t tryAt = 0; static bool trying = false;
-      if (!trying && millis() - tryAt > 60000) { tryAt = millis(); trying = true; WiFi.begin(cfgSsid, cfgPass); }
-      if (trying && millis() - tryAt > 8000 && WiFi.status() != WL_CONNECTED) { trying = false; WiFi.disconnect(); }
+      if (portalTrying && (portalClients() > 0 || (millis() - portalTryAt > 8000 && WiFi.status() != WL_CONNECTED))) {
+        portalTrying = false; WiFi.disconnect();
+      }
+      if (!portalTrying && portalClients() == 0 && millis() - portalTryAt > 60000) {
+        portalTryAt = millis(); portalTrying = true; WiFi.begin(cfgSsid, cfgPass);
+      }
     }
     // saved WiFi came back while we sat in FAILURE-entered setup -> resume normal
     if (portalStaRetry && !portalSaved() && WiFi.status() == WL_CONNECTED) exitPortal();

@@ -54,6 +54,7 @@ static String pageHtml() {
 
 static void buildNets() {
   int n = WiFi.scanNetworks();   // blocking (~2-3 s); AP keeps running in AP_STA
+  if (n <= 0) { delay(400); n = WiFi.scanNetworks(); }   // one retry — scans can whiff right after a mode change
   if (n > 64) n = 64;
   netsHtml = "";
   bool used[64] = {false};
@@ -96,6 +97,8 @@ void portalStart() {
   uint8_t mac[6]; WiFi.macAddress(mac);
   snprintf(apName, sizeof(apName), "Gauge-%02X%02X", mac[4], mac[5]);
   WiFi.mode(WIFI_AP_STA);       // AP for the phone + STA side free for scans/retries
+  WiFi.disconnect();            // idle the STA FIRST — scanning mid-join-attempt returns nothing
+  delay(250);
   buildNets();                  // scan BEFORE the AP has clients for a clean list
   WiFi.softAP(apName);          // open network, 192.168.4.1
   dns.start(53, "*", WiFi.softAPIP());
