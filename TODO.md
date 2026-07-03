@@ -57,8 +57,12 @@
 
 - [ ] Alarm framework: per-alarm buzzer cadences + on-screen banner regardless of page
       (drag, wind, AIS, baro-fall, freezer-warm, low SoC, shore-power loss).
-- [ ] **Night mode:** dim/red skin + backlight dimming (CH32V003 reg 0x05 = backlight PWM)
-      — schedule or button. Essential for the V-berth.
+- [x] Display modes DAY / NIGHT / SLEEP (tap-to-wake 20s) / AUTO (sunrise-sunset from
+      GPS pos+time), bottom-left cycle button, persisted to NVS, alarms force full
+      brightness (done 2026-07-03). Still open: **red night skin** (night-vision), and
+      per-mode brightness/timeout settings on the future web config page.
+- [ ] Measure real current draw per mode (inline USB power meter or Victron DC-load
+      delta) → power table for the README.
 - [ ] Buttons → SignalK PUTs for Cerbo relays (`electrical.switches.venus-0/1`) — deck /
       anchor light switching from the gauge.
 

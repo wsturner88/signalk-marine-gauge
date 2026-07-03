@@ -15,7 +15,10 @@
 #include "Arduino_GFX_Library.h"
 #include "lv_conf.h"
 #include "TouchDrvGT911.hpp"
+#include <Preferences.h>
 #include "secrets.h"
+
+Preferences prefs;   // NVS: display mode survives power cycles
 
 LV_FONT_DECLARE(montserrat_80);
 LV_FONT_DECLARE(montserrat_150);
@@ -118,7 +121,51 @@ struct Boat {
   float baro = NAN, cabinHum = NAN;   // Pa, ratio 0-1 (Cerbo CABIN Ruuvi)
   float freezerTemp = NAN;            // K (Cerbo sensor named "Freezer")
   float outsideTemp = NAN;            // K — no source yet; standard path subscribed for a future weather feed/sensor
+  int   doy = 0; float utc = 0;       // GPS date/time (for the AUTO day/night sun calc)
+  uint32_t utcAtMs = 0; bool timeValid = false;
 } boat;
+
+// ---------------- Display modes / backlight ----------------
+// The CH32V003 expander exposes the backlight PWM duty at reg 0x05 (0-255).
+enum : uint8_t { DM_DAY, DM_NIGHT, DM_SLEEP, DM_AUTO };
+static const char *dmName[] = {"DAY", "NIGHT", "SLEEP", "AUTO"};
+#define BL_DAY   255
+#define BL_NIGHT 12     // always-readable dim glow (nav station / V-berth)
+#define BL_WAKE  200    // SLEEP: brightness after a wake tap
+static uint8_t  dispMode = DM_DAY;
+static uint32_t wakeUntil = 0;         // SLEEP: stay lit until this ms
+static bool     alarmSounding = false; // any active alarm forces full brightness
+static void setBacklight(uint8_t v) {
+  static int cur = -1;
+  if ((int)v == cur) return;
+  cur = v;
+  exReg(0x05, v);
+}
+// Sun above civil twilight (-6°)? NOAA-approx solar elevation from GPS pos+time.
+// No time/position yet -> assume day (bright is the safe failure mode).
+static bool sunIsUp() {
+  if (!boat.timeValid || isnan(boat.lat)) return true;
+  float utc = boat.utc + (millis() - boat.utcAtMs) / 3600000.0f;
+  float g = 6.2832f / 365.0f * (boat.doy - 1 + (utc - 12) / 24.0f);
+  float decl = 0.006918f - 0.399912f * cosf(g) + 0.070257f * sinf(g) - 0.006758f * cosf(2 * g)
+             + 0.000907f * sinf(2 * g) - 0.002697f * cosf(3 * g) + 0.00148f * sinf(3 * g);
+  float ha  = (utc + (float)boat.lon / 15.0f - 12.0f) * 15.0f * 0.0174533f;
+  float lat = (float)boat.lat * 0.0174533f;
+  float elev = asinf(sinf(lat) * sinf(decl) + cosf(lat) * cosf(decl) * cosf(ha));
+  return elev > -0.105f;
+}
+static void applyBacklight() {
+  uint8_t v;
+  if (alarmSounding) v = BL_DAY;                    // alarms override every mode
+  else switch (dispMode) {
+    default:
+    case DM_DAY:   v = BL_DAY; break;
+    case DM_NIGHT: v = BL_NIGHT; break;
+    case DM_SLEEP: v = (millis() < wakeUntil) ? BL_WAKE : 0; break;
+    case DM_AUTO:  v = sunIsUp() ? BL_DAY : BL_NIGHT; break;
+  }
+  setBacklight(v);
+}
 static bool dataDirty = false;
 
 // ---------------- UI handles ----------------
@@ -678,6 +725,15 @@ static void onGesture(lv_event_t *) {
 }
 static void navPrevCb(lv_event_t *) { gotoTile(curTile - 1); }
 static void navNextCb(lv_event_t *) { gotoTile(curTile + 1); }
+// display-mode button (bottom-left, every page): tap cycles DAY/NIGHT/SLEEP/AUTO
+static lv_obj_t *modeBtnLbl;
+static void modeCb(lv_event_t *) {
+  dispMode = (dispMode + 1) & 3;
+  prefs.putUChar("dmode", dispMode);
+  lv_label_set_text(modeBtnLbl, dmName[dispMode]);
+  wakeUntil = millis() + 20000;   // entering SLEEP: stay lit 20s so the change is visible
+  applyBacklight();
+}
 static void navBtn(lv_obj_t *parent, const char *sym, int xoff, lv_event_cb_t cb) {
   lv_obj_t *b = lv_btn_create(parent);
   lv_obj_set_size(b, 54, 42);
@@ -716,6 +772,18 @@ static void buildUI() {
   updateDots();         // render the correct number of dots for NTILES
   navBtn(scr, LV_SYMBOL_LEFT, -120, navPrevCb);    // instant prev/next page (snappier than swipe)
   navBtn(scr, LV_SYMBOL_RIGHT, 120, navNextCb);
+  lv_obj_t *mb = lv_btn_create(scr);               // display-mode cycle button
+  lv_obj_set_size(mb, 70, 34);
+  lv_obj_align(mb, LV_ALIGN_BOTTOM_LEFT, 8, -6);
+  lv_obj_set_style_bg_color(mb, lv_color_hex(C_CARD), 0);
+  lv_obj_set_style_bg_opa(mb, LV_OPA_60, 0);
+  lv_obj_set_style_radius(mb, 10, 0);
+  modeBtnLbl = lv_label_create(mb);
+  lv_label_set_text(modeBtnLbl, dmName[dispMode]);
+  lv_obj_set_style_text_color(modeBtnLbl, lv_color_hex(C_DIM), 0);
+  lv_obj_set_style_text_font(modeBtnLbl, &lv_font_montserrat_14, 0);
+  lv_obj_center(modeBtnLbl);
+  lv_obj_add_event_cb(mb, modeCb, LV_EVENT_CLICKED, NULL);
   setSk(false); setWifi(false);   // init the status labels on the system page
 }
 
@@ -907,6 +975,7 @@ static void sendSubscription() {
     "{\"path\":\"electrical.solar.278.yieldToday\",\"period\":5000},"
     "{\"path\":\"electrical.venus.acSource\",\"period\":5000},"
     "{\"path\":\"navigation.position\",\"period\":2000},"
+    "{\"path\":\"navigation.datetime\",\"period\":30000},"
     "{\"path\":\"navigation.anchor.position\",\"period\":5000},"
     "{\"path\":\"navigation.anchor.state\",\"period\":2000},"
     "{\"path\":\"navigation.anchor.currentRadius\",\"period\":1000},"
@@ -952,6 +1021,16 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
   else if (!strcmp(p, "navigation.position")) { boat.lat = v["latitude"].as<double>(); boat.lon = v["longitude"].as<double>(); }
+  else if (!strcmp(p, "navigation.datetime")) {   // GPS UTC, for the AUTO sun calc
+    const char *s = v.as<const char *>();
+    int Y, M, D, h, m; float sec;
+    if (s && sscanf(s, "%d-%d-%dT%d:%d:%f", &Y, &M, &D, &h, &m, &sec) == 6) {
+      static const int cum[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+      boat.doy = cum[M - 1] + D + ((M > 2 && Y % 4 == 0) ? 1 : 0);
+      boat.utc = h + m / 60.0f + sec / 3600.0f;
+      boat.utcAtMs = millis(); boat.timeValid = true;
+    }
+  }
   else if (!strcmp(p, "navigation.anchor.position")) {
     boat.seenY2k = true;
     boat.anchorLat = v["latitude"].as<double>(); boat.anchorLon = v["longitude"].as<double>();
@@ -987,6 +1066,9 @@ static void wsEvent(WStype_t type, uint8_t *payload, size_t len) {
 void setup() {
   Serial.begin(115200); delay(800);
   Serial.println("\n\n=== BIJOUX gauge boot ===");
+  prefs.begin("gauge", false);
+  dispMode = prefs.getUChar("dmode", DM_DAY) & 3;
+  wakeUntil = millis() + 60000;   // booting in SLEEP: stay lit a minute
   Wire.begin(15, 7);
   expanderInit();     // CH32V003: all outputs HIGH (release LCD/touch resets), backlight on, buzzer off
   delay(200);
@@ -1112,10 +1194,15 @@ void loop() {
     static uint32_t beepAt = 0; static bool alarmOn = false;
     bool dragging = (!strcmp(boat.anchorState, "alarm") || !strcmp(boat.anchorState, "emergency")) ||
                     (!isnan(boat.anchorRadius) && !isnan(boat.anchorMaxRadius) && boat.anchorRadius > boat.anchorMaxRadius);
+    alarmSounding = dragging;   // forces full brightness in every display mode
     if (dragging) {
       if (millis() - beepAt > 350) { beepAt = millis(); alarmOn = !alarmOn; buzzer(alarmOn); }
     } else if (alarmOn) { alarmOn = false; buzzer(false); }
   }
+  // Display modes: a touch while sleeping lights the screen for 20s; the
+  // backlight setter is change-guarded so calling every pass is free.
+  if (dispMode == DM_SLEEP && touchDown) wakeUntil = millis() + 20000;
+  applyBacklight();
   static uint32_t beat = 0;
   if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d sk=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), skUp, ESP.getFreeHeap(), touchOK); }
   delay(5);
