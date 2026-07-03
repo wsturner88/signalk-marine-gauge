@@ -33,9 +33,13 @@ LV_IMG_DECLARE(boat_img);
 
 // ---------------- Display ----------------
 Arduino_DataBus *bus = new Arduino_SWSPI(GFX_NOT_DEFINED, 42, 2, 1, GFX_NOT_DEFINED);
+// prefer_speed 10MHz (default with OPI PSRAM is 12MHz): each bounce-buffer refill
+// gets ~20% more deadline, so scan-out slips (the rolled/shifted image) under
+// WiFi + heavy redraw are less likely. Refresh drops ~42Hz -> ~35Hz (fine on LCD).
 Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   40, 39, 38, 41, 46, 3, 8, 18, 17, 14, 13, 12, 11, 10, 9, 5, 45, 48, 47, 21,
-  1, 10, 8, 50, 1, 10, 8, 20);
+  1, 10, 8, 50, 1, 10, 8, 20,
+  0 /*pclk_active_neg*/, 10000000L /*prefer_speed*/);
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
   480, 480, rgbpanel, 0, true, bus, GFX_NOT_DEFINED,
   st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
@@ -43,6 +47,16 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
 static uint32_t W, H;
 static lv_disp_draw_buf_t draw_buf;
 static esp_lcd_panel_handle_t panelHandle = nullptr;
+// Realign the RGB scan-out DMA to the frame start. Cures the circular offset
+// (rolled image, top lines wrapped to the bottom) whenever the bounce-buffer
+// refill missed a deadline and the picture slipped. Brief flicker per call.
+static uint32_t lastResync = 0;
+static void fbResync(const char *why) {
+  if (!panelHandle) return;
+  lastResync = millis();
+  esp_lcd_rgb_panel_restart(panelHandle);
+  Serial.printf("[fb] resync (%s) at %lu ms\n", why, lastResync);
+}
 #define TICK_MS 2
 static void disp_flush(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *px) {
   gfx->draw16bitRGBBitmap(a->x1, a->y1, (uint16_t *)&px->full,
@@ -55,10 +69,12 @@ static void tick_cb(void *) { lv_tick_inc(TICK_MS); }
 TouchDrvGT911 touch;
 static bool touchOK = false;
 static int16_t tpx[5], tpy[5];
+static bool touchDown = false;  // gates data-driven redraws during a flick
 static void touch_read(lv_indev_drv_t *, lv_indev_data_t *data) {
   if (touchOK && touch.getPoint(tpx, tpy, 1) > 0) {
     data->state = LV_INDEV_STATE_PR; data->point.x = tpx[0]; data->point.y = tpy[0];
   } else data->state = LV_INDEV_STATE_REL;
+  touchDown = (data->state == LV_INDEV_STATE_PR);
 }
 
 // ---------------- Expander / buzzer ----------------
@@ -123,7 +139,9 @@ static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl,
 // anchor page
 static lv_obj_t *anchorStateLbl, *anchorRangeLbl, *anchorBar;
 
+static bool skUp = false;
 static void setSk(bool ok) {
+  skUp = ok;
   if (!sysSkState) return;
   lv_label_set_text(sysSkState, ok ? "Connected" : "Disconnected");
   lv_obj_set_style_text_color(sysSkState, lv_color_hex(ok ? C_GREEN : C_RED), 0);
@@ -202,6 +220,10 @@ static void buildWind(lv_obj_t *tile) {
   lv_obj_center(windMeter);
   lv_obj_set_style_bg_color(windMeter, lv_color_hex(0x0A1018), 0);
   lv_obj_set_style_border_width(windMeter, 0, 0);
+  // The card() pages clear this; the meter must too. Its compass labels overhang
+  // the edge, so LVGL treats it as scrollable — a drag on it then gets claimed as
+  // a scroll and never becomes the page-flick gesture.
+  lv_obj_clear_flag(windMeter, LV_OBJ_FLAG_SCROLLABLE);
   lv_meter_scale_t *sc = lv_meter_add_scale(windMeter);
   lv_meter_set_scale_range(windMeter, sc, 0, 360, 360, 270);
   lv_meter_set_scale_ticks(windMeter, sc, 73, 1, 7, lv_color_hex(0x263038));
@@ -458,6 +480,19 @@ static void gotoTile(int idx) {
   lv_obj_set_tile_id(tileView, idx, 0, LV_ANIM_OFF);
   updateDots();
   lv_obj_invalidate(lv_scr_act());
+  // Schedule the settle repaint + scan-out resync ourselves — a programmatic
+  // no-anim tile jump doesn't reliably fire the tileview's VALUE_CHANGED.
+  tileChangedAt = millis();
+  tileRefreshPending = true;
+}
+// Swipe = LVGL flick gesture (~50px), not a tileview drag. The wind page is too
+// heavy to render frame-by-frame under a finger: the drag stuttered, needed most
+// of the screen width to commit, and a swipe that snapped back never fired the
+// settle handler — leaving the page shifted. A flick anywhere now just jumps.
+static void onGesture(lv_event_t *) {
+  lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_get_act());
+  if (d == LV_DIR_LEFT)       gotoTile(curTile + 1);
+  else if (d == LV_DIR_RIGHT) gotoTile(curTile - 1);
 }
 static void navPrevCb(lv_event_t *) { gotoTile(curTile - 1); }
 static void navNextCb(lv_event_t *) { gotoTile(curTile + 1); }
@@ -481,10 +516,17 @@ static void buildUI() {
   tileView = lv_tileview_create(scr);
   lv_obj_set_style_bg_color(tileView, lv_color_hex(C_BG), 0);
   lv_obj_set_style_bg_opa(tileView, LV_OPA_COVER, 0);
-  for (int i = 0; i < NTILES; i++) tiles[i] = lv_tileview_add_tile(tileView, i, 0, LV_DIR_HOR);
+  for (int i = 0; i < NTILES; i++) {
+    tiles[i] = lv_tileview_add_tile(tileView, i, 0, LV_DIR_HOR);
+    lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_SCROLLABLE);  // page content must never claim the flick
+  }
   buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]);
   buildAnchor(tiles[4]); buildSystem(tiles[5]);
   lv_obj_add_event_cb(tileView, onTile, LV_EVENT_VALUE_CHANGED, NULL);
+  // No finger-dragging of the tileview (see onGesture) — pages change only via
+  // instant jumps, so a partial drag can never leave the view between tiles.
+  lv_obj_clear_flag(tileView, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(scr, onGesture, LV_EVENT_GESTURE, NULL);
 
   pageDots = lv_label_create(scr);
   lv_label_set_recolor(pageDots, true);
@@ -744,23 +786,33 @@ void loop() {
   // cold boot). Fire a few times in the first few seconds — a single one didn't
   // clear it on a true cold boot, repeating does. Each is a brief flicker.
   static int fbResyncs = 0;
-  static uint32_t lastResync = 0;
   if (fbResyncs < 4 && millis() > 800 && millis() - lastResync > 900) {
-    lastResync = millis(); fbResyncs++;
-    esp_lcd_rgb_panel_restart(panelHandle);
-    Serial.printf("[fb] resync #%d at %lu ms\n", fbResyncs, millis());
+    fbResyncs++; fbResync("boot");
   }
+  // Safety net for runtime drift: whatever slips between event-driven resyncs
+  // gets realigned within 2 minutes.
+  if (millis() - lastResync > 120000) fbResync("periodic");
   static bool up = false;
   if (WiFi.status() == WL_CONNECTED) {
     if (!up) { up = true; Serial.printf("WiFi IP %s\n", WiFi.localIP().toString().c_str()); setWifi(true); updateSysInfo(); }
     ws.loop();
   } else if (up) { up = false; setWifi(false); }
   static uint32_t lastUI = 0;
-  if (dataDirty && millis() - lastUI > 150) { lastUI = millis(); dataDirty = false; updateUI(); }
+  // Hold data-driven repaints while a finger is down: the wind page's compass
+  // rotation invalidates huge areas, and a redraw mid-flick starves touch
+  // sampling so the gesture gets missed. Data catches up on release.
+  if (dataDirty && !touchDown && millis() - lastUI > 150) { lastUI = millis(); dataDirty = false; updateUI(); }
   // ~400ms after a swipe lands, recompute wind positions + repaint once (clean
   // restore of the wind page). Runs here in loop context, so it can't stutter the swipe.
   if (tileRefreshPending && millis() - tileChangedAt > 400) {
-    tileRefreshPending = false; updateUI(); lv_obj_invalidate(lv_scr_act());
+    tileRefreshPending = false;
+    // Hard-snap to the active tile: a swipe can settle a few px off an exact
+    // tile boundary, leaving the whole page shifted left/right. No-op if aligned.
+    lv_obj_set_tile_id(tileView, curTile, 0, LV_ANIM_OFF);
+    // Swipes on heavy pages are peak PSRAM traffic — exactly when the scan-out
+    // slips. Realign now; the flicker hides inside the settle repaint.
+    fbResync("tile");
+    updateUI(); lv_obj_invalidate(lv_scr_act());
   }
   lv_timer_handler();
   // Anchor drag alarm: pulse the buzzer (~350ms on/off) whenever the y2k plugin
@@ -774,6 +826,6 @@ void loop() {
     } else if (alarmOn) { alarmOn = false; buzzer(false); }
   }
   static uint32_t beat = 0;
-  if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), ESP.getFreeHeap(), touchOK); }
+  if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d sk=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), skUp, ESP.getFreeHeap(), touchOK); }
   delay(5);
 }
