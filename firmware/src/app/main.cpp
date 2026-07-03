@@ -112,11 +112,14 @@ struct Boat {
   float waterPort = NAN, waterStbd = NAN, waterAft = NAN;
   float solarW = NAN, solarYield = NAN;
   char  shore[20] = "--";
+  float baro = NAN, cabinHum = NAN;   // Pa, ratio 0-1 (Cerbo CABIN Ruuvi)
+  float freezerTemp = NAN;            // K (Cerbo sensor named "Freezer")
+  float outsideTemp = NAN;            // K — no source yet; standard path subscribed for a future weather feed/sensor
 } boat;
 static bool dataDirty = false;
 
 // ---------------- UI handles ----------------
-#define NTILES 6
+#define NTILES 7
 static lv_obj_t *tiles[NTILES], *pageDots, *tileView;
 static int curTile = 0;
 // wind
@@ -138,6 +141,11 @@ static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yield
 static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
 // anchor page
 static lv_obj_t *anchorStateLbl, *anchorRangeLbl, *anchorBar;
+// weather page
+static lv_obj_t *baroArc, *baroValLbl, *baroTrendLbl, *baroChart;
+static lv_chart_series_t *baroSer;
+static lv_obj_t *wxOutLbl, *wxCabinLbl, *wxFreezeLbl;
+static float baroHist[144]; static int baroN = 0;   // 10-min samples = 24h (RAM only, resets on boot)
 
 static bool skUp = false;
 static void setSk(bool ok) {
@@ -430,6 +438,58 @@ static void buildAnchor(lv_obj_t *tile) {
   lv_obj_add_event_cb(tb, anchorTestCb, LV_EVENT_CLICKED, NULL);
 }
 
+// ---- page 5: weather ----
+// Barometer (Cerbo CABIN Ruuvi) with an on-device 3h trend + 24h history chart.
+// OUTSIDE stays "--" until a source exists (weather plugin or an outdoor sensor).
+static void buildWeather(lv_obj_t *tile) {
+  lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
+  titleLabel(tile, "WEATHER");
+
+  lv_obj_t *cb = card(tile, 14, 44, 260, 252, "Barometer");
+  baroArc = lv_arc_create(cb);
+  lv_obj_set_size(baroArc, 168, 168);
+  lv_obj_align(baroArc, LV_ALIGN_TOP_MID, 0, 16);
+  lv_arc_set_rotation(baroArc, 135);
+  lv_arc_set_bg_angles(baroArc, 0, 270);
+  lv_arc_set_range(baroArc, 980, 1040);          // mb — covers deep low to strong high
+  lv_obj_remove_style(baroArc, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(baroArc, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_width(baroArc, 12, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(baroArc, 12, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(baroArc, lv_color_hex(0x1E2A38), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(baroArc, lv_color_hex(C_ACCENT), LV_PART_INDICATOR);
+  baroValLbl = centerNum(cb, &lv_font_montserrat_36, LV_ALIGN_TOP_MID, 0, 76);
+  dimLbl(cb, "mb", &lv_font_montserrat_14, LV_ALIGN_TOP_MID, 0, 114);
+  baroTrendLbl = centerNum(cb, &lv_font_montserrat_20, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_label_set_text(baroTrendLbl, "trend --");
+  lv_obj_set_style_text_color(baroTrendLbl, lv_color_hex(C_DIM), 0);
+
+  lv_obj_t *co = card(tile, 288, 44, 178, 78, "Outside");
+  wxOutLbl = bigVal(co, &lv_font_montserrat_28);
+  lv_obj_align(wxOutLbl, LV_ALIGN_BOTTOM_LEFT, 0, 2);
+  lv_obj_t *cc = card(tile, 288, 131, 178, 78, "Cabin");
+  wxCabinLbl = bigVal(cc, &lv_font_montserrat_28);
+  lv_obj_align(wxCabinLbl, LV_ALIGN_BOTTOM_LEFT, 0, 2);
+  lv_obj_t *cf = card(tile, 288, 218, 178, 78, "Freezer");
+  wxFreezeLbl = bigVal(cf, &lv_font_montserrat_28);
+  lv_obj_align(wxFreezeLbl, LV_ALIGN_BOTTOM_LEFT, 0, 2);
+
+  lv_obj_t *ch = card(tile, 14, 304, 452, 122, "Pressure  (24 h)");
+  baroChart = lv_chart_create(ch);
+  lv_obj_set_size(baroChart, 424, 74);
+  lv_obj_align(baroChart, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_chart_set_type(baroChart, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(baroChart, 144);      // one point per 10 min
+  lv_chart_set_update_mode(baroChart, LV_CHART_UPDATE_MODE_SHIFT);
+  lv_chart_set_div_line_count(baroChart, 3, 5);
+  lv_obj_set_style_bg_opa(baroChart, LV_OPA_0, 0);
+  lv_obj_set_style_border_width(baroChart, 0, 0);
+  lv_obj_set_style_line_color(baroChart, lv_color_hex(0x1E2A38), LV_PART_MAIN);
+  lv_obj_set_style_size(baroChart, 0, LV_PART_INDICATOR);   // line only, no point dots
+  baroSer = lv_chart_add_series(baroChart, lv_color_hex(C_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
+  lv_chart_set_all_value(baroChart, baroSer, LV_CHART_POINT_NONE);
+}
+
 // ---- page 5: system / connection (WiFi + SignalK status, gusts in corners) ----
 static void buildSystem(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
@@ -545,7 +605,7 @@ static void buildUI() {
     lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_SCROLLABLE);  // page content must never claim the flick
   }
   buildWind(tiles[0]); buildSpeedDepth(tiles[1]); buildStatus(tiles[2]); buildPower(tiles[3]);
-  buildAnchor(tiles[4]); buildSystem(tiles[5]);
+  buildAnchor(tiles[4]); buildWeather(tiles[5]); buildSystem(tiles[6]);
   lv_obj_add_event_cb(tileView, onTile, LV_EVENT_VALUE_CHANGED, NULL);
   // No finger-dragging of the tileview (see onGesture) — pages change only via
   // instant jumps, so a partial drag can never leave the view between tiles.
@@ -669,6 +729,21 @@ static void updateUI() {
     else if (!strcmp(s, "shore"))     { lv_label_set_text(srcLbl, LV_SYMBOL_CHARGE " Shore");  lv_obj_set_style_text_color(srcLbl, lv_color_hex(C_GREEN), 0); }
     else if (s[0] && strcmp(s, "--")) { lv_label_set_text(srcLbl, s); lv_obj_set_style_text_color(srcLbl, lv_color_hex(C_TEXT), 0); }
   }
+  // --- weather (page 5) ---
+  if (!isnan(boat.baro)) {
+    snprintf(b, sizeof(b), "%.1f", boat.baro / 100.0f); setTxt(baroValLbl, b);
+    int v = (int)(boat.baro / 100.0f + 0.5f); if (v < 980) v = 980; if (v > 1040) v = 1040;
+    static int lastBv = -1;
+    if (v != lastBv) { lastBv = v; lv_arc_set_value(baroArc, v); }
+  }
+  if (!isnan(boat.outsideTemp)) { snprintf(b, sizeof(b), "%d\xC2\xB0""F", (int)(boat.outsideTemp * 1.8f - 459.67f + 0.5f)); setTxt(wxOutLbl, b); }
+  if (!isnan(boat.cabinTemp)) {
+    int tf = (int)(boat.cabinTemp * 1.8f - 459.67f + 0.5f);
+    if (!isnan(boat.cabinHum)) snprintf(b, sizeof(b), "%d\xC2\xB0""F  %d%%", tf, (int)(boat.cabinHum * 100 + 0.5f));
+    else                       snprintf(b, sizeof(b), "%d\xC2\xB0""F", tf);
+    setTxt(wxCabinLbl, b);
+  }
+  if (!isnan(boat.freezerTemp)) { snprintf(b, sizeof(b), "%.1f\xC2\xB0""F", boat.freezerTemp * 1.8f - 459.67f); setTxt(wxFreezeLbl, b); }
   // --- anchor watch (page 4) ---
   {
     // Anchored = navigation.anchor.state "on". Dragging = currentRadius beyond
@@ -720,6 +795,10 @@ static void sendSubscription() {
     "{\"path\":\"tanks.freshWater.22.currentLevel\",\"period\":5000},"
     "{\"path\":\"tanks.freshWater.23.currentLevel\",\"period\":5000},"
     "{\"path\":\"environment.venus.28.temperature\",\"period\":5000},"
+    "{\"path\":\"environment.venus.28.pressure\",\"period\":5000},"
+    "{\"path\":\"environment.venus.28.humidity\",\"period\":10000},"
+    "{\"path\":\"environment.inside.refrigerator.temperature\",\"period\":10000},"
+    "{\"path\":\"environment.outside.temperature\",\"period\":10000},"
     "{\"path\":\"electrical.solar.278.panelPower\",\"period\":2000},"
     "{\"path\":\"electrical.solar.278.yieldToday\",\"period\":5000},"
     "{\"path\":\"electrical.venus.acSource\",\"period\":5000},"
@@ -759,6 +838,10 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "tanks.freshWater.22.currentLevel")) boat.waterStbd = v.as<float>();
   else if (!strcmp(p, "tanks.freshWater.23.currentLevel")) boat.waterPort = v.as<float>();
   else if (!strcmp(p, "environment.venus.28.temperature")) boat.cabinTemp = v.as<float>();
+  else if (!strcmp(p, "environment.venus.28.pressure")) boat.baro = v.as<float>();
+  else if (!strcmp(p, "environment.venus.28.humidity")) boat.cabinHum = v.as<float>();
+  else if (!strcmp(p, "environment.inside.refrigerator.temperature")) boat.freezerTemp = v.as<float>();
+  else if (!strcmp(p, "environment.outside.temperature")) boat.outsideTemp = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.panelPower")) boat.solarW = v.as<float>();
   else if (!strcmp(p, "electrical.solar.278.yieldToday")) boat.solarYield = v.as<float>();
   else if (!strcmp(p, "electrical.venus.acSource")) { const char *s = v.as<const char *>(); if (s) strlcpy(boat.shore, s, sizeof(boat.shore)); }
@@ -860,6 +943,33 @@ void loop() {
     // slips. Realign now; the flicker hides inside the settle repaint.
     fbResync("tile");
     updateUI(); lv_obj_invalidate(lv_scr_act());
+  }
+  // Barometer log: one sample per 10 min -> 24h ring, chart point, and the 3h
+  // trend (the number that matters — a fast fall means weather is coming).
+  {
+    static uint32_t lastBaro = 0;
+    if (!isnan(boat.baro) && (lastBaro == 0 || millis() - lastBaro > 600000UL)) {
+      lastBaro = millis();
+      float mb = boat.baro / 100.0f;
+      if (baroN < 144) baroHist[baroN++] = mb;
+      else { memmove(baroHist, baroHist + 1, 143 * sizeof(float)); baroHist[143] = mb; }
+      lv_chart_set_next_value(baroChart, baroSer, (lv_coord_t)(mb * 10 + 0.5f));
+      float mn = baroHist[0], mx = baroHist[0];
+      for (int i = 1; i < baroN; i++) { mn = fminf(mn, baroHist[i]); mx = fmaxf(mx, baroHist[i]); }
+      lv_chart_set_range(baroChart, LV_CHART_AXIS_PRIMARY_Y,
+                         (lv_coord_t)((mn - 1) * 10), (lv_coord_t)((mx + 1) * 10));
+      if (baroN >= 2) {
+        int back = (baroN - 1 < 18) ? baroN - 1 : 18;              // 18 samples = 3h
+        float d3h = (baroHist[baroN - 1] - baroHist[baroN - 1 - back]) * (18.0f / back);
+        char t[40];
+        const char *sym = d3h > 0.5f ? LV_SYMBOL_UP : (d3h < -0.5f ? LV_SYMBOL_DOWN : LV_SYMBOL_MINUS);
+        snprintf(t, sizeof(t), "%s %+.1f mb / 3h", sym, d3h);
+        setTxt(baroTrendLbl, t);
+        // marine rules of thumb: >1 mb/3h = change coming, >3 falling = gale watch
+        uint32_t c = d3h <= -3.0f ? C_RED : (d3h <= -1.0f ? C_YELLOW : (d3h >= 1.0f ? C_GREEN : C_DIM));
+        lv_obj_set_style_text_color(baroTrendLbl, lv_color_hex(c), 0);
+      }
+    }
   }
   lv_timer_handler();
   // Anchor drag alarm: pulse the buzzer (~350ms on/off) whenever the y2k plugin
