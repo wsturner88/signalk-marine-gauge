@@ -130,6 +130,18 @@ struct Boat {
 // The CH32V003 expander exposes the backlight PWM duty at reg 0x05 (0-255).
 enum : uint8_t { DM_DAY, DM_NIGHT, DM_SLEEP, DM_AUTO };
 static const char *dmName[] = {"DAY", "NIGHT", "SLEEP", "AUTO"};
+static const char *dmDesc[] = {
+  "full brightness, always on",
+  "dim glow, always on",
+  "dark - touch to wake 20 s",
+  "day / night by sun at GPS position",
+};
+static lv_obj_t *modeBtnLbl, *modeDescLbl;
+static void modeCb(lv_event_t *);
+// Saving the mode to flash stalls the PSRAM path and slips the scan-out (the
+// roll!), so the NVS write is DEFERRED until 4s after the last tap, and a
+// resync fires right after it (see loop()).
+static bool modeDirty = false; static uint32_t modeDirtyAt = 0;
 #define BL_DAY   255
 #define BL_NIGHT 30     // always-readable dim glow (nav station / V-berth) — tune to taste
 #define BL_WAKE  200    // SLEEP: brightness after a wake tap
@@ -649,31 +661,55 @@ static void buildSystem(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
   titleLabel(tile, "SYSTEM");
 
-  // WiFi card
-  lv_obj_t *cw = card(tile, 24, 96, 432, 150, "WiFi");
+  // WiFi card (slim: state + one info line)
+  lv_obj_t *cw = card(tile, 24, 52, 432, 104, "WiFi");
   sysWifiState = lv_label_create(cw);
   lv_label_set_text(sysWifiState, "Disconnected");
   lv_obj_set_style_text_font(sysWifiState, &lv_font_montserrat_28, 0);
   lv_obj_set_style_text_color(sysWifiState, lv_color_hex(C_RED), 0);
-  lv_obj_align(sysWifiState, LV_ALIGN_TOP_LEFT, 0, 30);
+  lv_obj_align(sysWifiState, LV_ALIGN_TOP_LEFT, 0, 26);
   sysWifiInfo = lv_label_create(cw);
   lv_label_set_text(sysWifiInfo, "--");
   lv_obj_set_style_text_font(sysWifiInfo, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(sysWifiInfo, lv_color_hex(C_DIM), 0);
-  lv_obj_align(sysWifiInfo, LV_ALIGN_TOP_LEFT, 0, 72);
+  lv_obj_align(sysWifiInfo, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
-  // SignalK card
-  lv_obj_t *cs = card(tile, 24, 262, 432, 150, "SignalK data");
+  // SignalK card (slim)
+  lv_obj_t *cs = card(tile, 24, 168, 432, 104, "SignalK data");
   sysSkState = lv_label_create(cs);
   lv_label_set_text(sysSkState, "Disconnected");
   lv_obj_set_style_text_font(sysSkState, &lv_font_montserrat_28, 0);
   lv_obj_set_style_text_color(sysSkState, lv_color_hex(C_RED), 0);
-  lv_obj_align(sysSkState, LV_ALIGN_TOP_LEFT, 0, 30);
+  lv_obj_align(sysSkState, LV_ALIGN_TOP_LEFT, 0, 26);
   sysSkInfo = lv_label_create(cs);
   lv_label_set_text(sysSkInfo, "--");
   lv_obj_set_style_text_font(sysSkInfo, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(sysSkInfo, lv_color_hex(C_DIM), 0);
-  lv_obj_align(sysSkInfo, LV_ALIGN_TOP_LEFT, 0, 72);
+  lv_obj_align(sysSkInfo, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+  // Display card: current mode + description, CHANGE button cycles
+  lv_obj_t *cd = card(tile, 24, 284, 432, 124, "Display");
+  modeBtnLbl = lv_label_create(cd);
+  lv_label_set_text(modeBtnLbl, dmName[dispMode]);
+  lv_obj_set_style_text_font(modeBtnLbl, &lv_font_montserrat_36, 0);
+  lv_obj_set_style_text_color(modeBtnLbl, lv_color_hex(C_ACCENT), 0);
+  lv_obj_align(modeBtnLbl, LV_ALIGN_TOP_LEFT, 0, 28);
+  modeDescLbl = lv_label_create(cd);
+  lv_label_set_text(modeDescLbl, dmDesc[dispMode]);
+  lv_obj_set_style_text_font(modeDescLbl, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(modeDescLbl, lv_color_hex(C_DIM), 0);
+  lv_obj_align(modeDescLbl, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_t *mb = lv_btn_create(cd);
+  lv_obj_set_size(mb, 118, 52);
+  lv_obj_align(mb, LV_ALIGN_RIGHT_MID, 0, 4);
+  lv_obj_set_style_bg_color(mb, lv_color_hex(0x1E2A38), 0);
+  lv_obj_set_style_radius(mb, 12, 0);
+  lv_obj_t *ml = lv_label_create(mb);
+  lv_label_set_text(ml, "CHANGE");
+  lv_obj_set_style_text_color(ml, lv_color_hex(C_TEXT), 0);
+  lv_obj_set_style_text_font(ml, &lv_font_montserrat_16, 0);
+  lv_obj_center(ml);
+  lv_obj_add_event_cb(mb, modeCb, LV_EVENT_CLICKED, NULL);
 }
 
 // refresh WiFi/SignalK detail text (called periodically + on connect)
@@ -681,11 +717,11 @@ static void updateSysInfo() {
   if (!sysWifiInfo) return;
   char b[80];
   if (WiFi.status() == WL_CONNECTED)
-    snprintf(b, sizeof(b), "%s\n%s   %ld dBm", WIFI_SSID, WiFi.localIP().toString().c_str(), (long)WiFi.RSSI());
+    snprintf(b, sizeof(b), "%s   %s   %ld dBm", WIFI_SSID, WiFi.localIP().toString().c_str(), (long)WiFi.RSSI());
   else
-    snprintf(b, sizeof(b), "%s\n(joining...)", WIFI_SSID);
+    snprintf(b, sizeof(b), "%s   (joining...)", WIFI_SSID);
   lv_label_set_text(sysWifiInfo, b);
-  snprintf(b, sizeof(b), "%s : %d\n%s", SK_HOST, SK_PORT, SK_PATH);
+  snprintf(b, sizeof(b), "%s : %d", SK_HOST, SK_PORT);
   lv_label_set_text(sysSkInfo, b);
 }
 
@@ -734,12 +770,13 @@ static void onGesture(lv_event_t *) {
 }
 static void navPrevCb(lv_event_t *) { gotoTile(curTile - 1); }
 static void navNextCb(lv_event_t *) { gotoTile(curTile + 1); }
-// display-mode button (bottom-left, every page): tap cycles DAY/NIGHT/SLEEP/AUTO
-static lv_obj_t *modeBtnLbl;
+// display-mode CHANGE button (System page): tap cycles DAY/NIGHT/SLEEP/AUTO.
+// No flash write here — deferred to loop() to keep the scan-out clean.
 static void modeCb(lv_event_t *) {
   dispMode = (dispMode + 1) & 3;
-  prefs.putUChar("dmode", dispMode);
+  modeDirty = true; modeDirtyAt = millis();
   lv_label_set_text(modeBtnLbl, dmName[dispMode]);
+  lv_label_set_text(modeDescLbl, dmDesc[dispMode]);
   wakeUntil = millis() + 20000;   // entering SLEEP: stay lit 20s so the change is visible
   applyBacklight();
 }
@@ -781,18 +818,6 @@ static void buildUI() {
   updateDots();         // render the correct number of dots for NTILES
   navBtn(scr, LV_SYMBOL_LEFT, -120, navPrevCb);    // instant prev/next page (snappier than swipe)
   navBtn(scr, LV_SYMBOL_RIGHT, 120, navNextCb);
-  lv_obj_t *mb = lv_btn_create(scr);               // display-mode cycle button
-  lv_obj_set_size(mb, 70, 34);
-  lv_obj_align(mb, LV_ALIGN_BOTTOM_LEFT, 8, -6);
-  lv_obj_set_style_bg_color(mb, lv_color_hex(C_CARD), 0);
-  lv_obj_set_style_bg_opa(mb, LV_OPA_60, 0);
-  lv_obj_set_style_radius(mb, 10, 0);
-  modeBtnLbl = lv_label_create(mb);
-  lv_label_set_text(modeBtnLbl, dmName[dispMode]);
-  lv_obj_set_style_text_color(modeBtnLbl, lv_color_hex(C_DIM), 0);
-  lv_obj_set_style_text_font(modeBtnLbl, &lv_font_montserrat_14, 0);
-  lv_obj_center(modeBtnLbl);
-  lv_obj_add_event_cb(mb, modeCb, LV_EVENT_CLICKED, NULL);
   setSk(false); setWifi(false);   // init the status labels on the system page
 }
 
@@ -1224,6 +1249,13 @@ void loop() {
   // backlight setter is change-guarded so calling every pass is free.
   if (dispMode == DM_SLEEP && touchDown) wakeUntil = millis() + 20000;
   applyBacklight();
+  // Deferred mode save: NVS/flash writes stall PSRAM and slip the scan-out, so
+  // commit well after the last tap and realign the panel immediately afterward.
+  if (modeDirty && millis() - modeDirtyAt > 4000) {
+    modeDirty = false;
+    prefs.putUChar("dmode", dispMode);
+    fbResync("nvs");
+  }
   static uint32_t beat = 0;
   if (millis() - beat > 4000) { beat = millis(); updateSysInfo(); Serial.printf("[beat] up=%lus wifi=%d sk=%d heap=%u touch=%d\n", millis()/1000, WiFi.status(), skUp, ESP.getFreeHeap(), touchOK); }
   delay(5);
