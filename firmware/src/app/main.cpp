@@ -30,8 +30,10 @@ static void loadConfig() {
   strlcpy(cfgPass,   prefs.getString("pass", "").c_str(),   sizeof(cfgPass));
   strlcpy(cfgSkHost, prefs.getString("skhost", "").c_str(), sizeof(cfgSkHost));
   cfgSkPort = prefs.getUShort("skport", 80);
-#ifdef WIFI_SSID
-  if (!cfgSsid[0]) {   // dev seed: first boot adopts secrets.h so BIJOUX units just work
+  // Out-of-the-box behavior: empty config -> onboarding portal at boot.
+  // Define SEED_FROM_SECRETS to auto-adopt secrets.h instead (dev convenience only).
+#if defined(SEED_FROM_SECRETS) && defined(WIFI_SSID)
+  if (!cfgSsid[0]) {
     strlcpy(cfgSsid, WIFI_SSID, sizeof(cfgSsid));
     strlcpy(cfgPass, WIFI_PASS, sizeof(cfgPass));
     strlcpy(cfgSkHost, SK_HOST, sizeof(cfgSkHost));
@@ -1231,7 +1233,7 @@ void setup() {
   prefs.begin("gauge", false);
   // one-time config reset (bad creds were saved during portal testing 2026-07-03);
   // bump the version to wipe again after a breaking config change
-  if (prefs.getUChar("cfgv", 0) < 1) { prefs.clear(); prefs.putUChar("cfgv", 1); Serial.println("[cfg] wiped (version bump)"); }
+  if (prefs.getUChar("cfgv", 0) < 2) { prefs.clear(); prefs.putUChar("cfgv", 2); Serial.println("[cfg] wiped (version bump)"); }   // v2: factory-fresh onboarding test 2026-07-03
   dispMode = prefs.getUChar("dmode", DM_DAY) & 3;
   wakeUntil = millis() + 60000;   // booting in SLEEP: stay lit a minute
   loadConfig();
