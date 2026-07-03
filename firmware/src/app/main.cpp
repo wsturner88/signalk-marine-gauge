@@ -114,6 +114,7 @@ struct Boat {
   double anchorLat = NAN, anchorLon = NAN;           // navigation.anchor.position
   bool  seenY2k = false;                             // any anchor-plugin path received
   float battSoc = NAN, battV = NAN, battA = NAN, battW = NAN;
+  float battTtg = NAN;   // s to empty (Victron caps at ~10 days when charging/full)
   float fuel = NAN, cabinTemp = NAN;
   float waterPort = NAN, waterStbd = NAN, waterAft = NAN;
   float solarW = NAN, solarYield = NAN;
@@ -130,16 +131,20 @@ struct Boat {
 enum : uint8_t { DM_DAY, DM_NIGHT, DM_SLEEP, DM_AUTO };
 static const char *dmName[] = {"DAY", "NIGHT", "SLEEP", "AUTO"};
 #define BL_DAY   255
-#define BL_NIGHT 12     // always-readable dim glow (nav station / V-berth)
+#define BL_NIGHT 30     // always-readable dim glow (nav station / V-berth) — tune to taste
 #define BL_WAKE  200    // SLEEP: brightness after a wake tap
 static uint8_t  dispMode = DM_DAY;
 static uint32_t wakeUntil = 0;         // SLEEP: stay lit until this ms
 static bool     alarmSounding = false; // any active alarm forces full brightness
+// v = desired brightness 0..255. The CH32V003 duty at reg 0x05 is INVERTED
+// (empirical, bltest 2026-07-03): low reg = bright, 255 = backlight off.
+// NEVER write reg value 0 — it latched the backlight dead until power loss.
 static void setBacklight(uint8_t v) {
   static int cur = -1;
   if ((int)v == cur) return;
   cur = v;
-  exReg(0x05, v);
+  uint8_t reg = (v == 0) ? 255 : (uint8_t)((255 - v) < 8 ? 8 : 255 - v);
+  exReg(0x05, reg);
 }
 // Sun above civil twilight (-6°)? NOAA-approx solar elevation from GPS pos+time.
 // No time/position yet -> assume day (bright is the safe failure mode).
@@ -186,7 +191,7 @@ static lv_obj_t *sdSpeed, *sdDepth;
 static lv_obj_t *battBar, *battLbl, *fuelBar, *fuelLbl;
 static lv_obj_t *wPortBar, *wPortLbl, *wStbdBar, *wStbdLbl, *wAftBar, *wAftLbl, *cabinLbl;
 // power
-static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yieldLbl, *srcLbl;
+static lv_obj_t *socArc, *socLbl, *battVLbl, *chgBox, *chgLbl, *solarLbl, *yieldLbl, *srcLbl, *ttgLbl;
 // system / connection page
 static lv_obj_t *sysWifiState, *sysWifiInfo, *sysSkState, *sysSkInfo, *gust5Lbl, *gust1hLbl;
 // anchor page
@@ -444,6 +449,10 @@ static void buildPower(lv_obj_t *tile) {
   lv_obj_set_style_text_color(chgLbl, lv_color_hex(0x05080F), 0);
   lv_obj_set_style_text_font(chgLbl, &lv_font_montserrat_22, 0);
   lv_obj_center(chgLbl);
+
+  // hours-to-empty, left of the SoC ring (Victron capacity.timeRemaining)
+  dimLbl(tile, "TIME LEFT", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, 18, 84);
+  ttgLbl = centerNum(tile, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, 18, 104);
 
   const int M = 14, cw = (480 - 3 * M) / 2, ch = 96, y = 330;
   lv_obj_t *csol = card(tile, M, y, cw, ch, "Solar");
@@ -879,6 +888,16 @@ static void updateUI() {
     lv_obj_set_style_arc_color(socArc, lv_color_hex(socColor(boat.battSoc)), LV_PART_INDICATOR);
   }
   if (!isnan(boat.battV)) { snprintf(b, sizeof(b), "%.2f V", boat.battV); lv_label_set_text(battVLbl, b); lv_obj_align_to(battVLbl, socArc, LV_ALIGN_CENTER, 0, 28); }
+  if (!isnan(boat.battTtg)) {
+    float t = boat.battTtg;
+    if (t >= 850000)     setTxt(ttgLbl, "--");            // Victron's "not really discharging" cap
+    else if (t < 3600)   { snprintf(b, sizeof(b), "%dm", (int)(t / 60)); setTxt(ttgLbl, b); }
+    else if (t < 86400)  { snprintf(b, sizeof(b), "%.1fh", t / 3600); setTxt(ttgLbl, b); }
+    else                 { snprintf(b, sizeof(b), "%dd %dh", (int)(t / 86400), (int)(t / 3600) % 24); setTxt(ttgLbl, b); }
+    static uint32_t lastTc = 0;
+    uint32_t tc = t < 4 * 3600 ? C_RED : (t < 12 * 3600 ? C_YELLOW : C_TEXT);
+    if (tc != lastTc) { lastTc = tc; lv_obj_set_style_text_color(ttgLbl, lv_color_hex(tc), 0); }
+  }
   if (!isnan(boat.battW)) {
     bool chg = boat.battW >= 0;
     snprintf(b, sizeof(b), "%dW", (int)fabsf(boat.battW));
@@ -962,6 +981,7 @@ static void sendSubscription() {
     "{\"path\":\"electrical.batteries.288.voltage\",\"period\":2000},"
     "{\"path\":\"electrical.batteries.288.current\",\"period\":2000},"
     "{\"path\":\"electrical.batteries.288.power\",\"period\":2000},"
+    "{\"path\":\"electrical.batteries.288.capacity.timeRemaining\",\"period\":5000},"
     "{\"path\":\"tanks.fuel.20.currentLevel\",\"period\":5000},"
     "{\"path\":\"tanks.freshWater.21.currentLevel\",\"period\":5000},"
     "{\"path\":\"tanks.freshWater.22.currentLevel\",\"period\":5000},"
@@ -1008,6 +1028,7 @@ static void applyDelta(const char *p, JsonVariantConst v) {
   else if (!strcmp(p, "electrical.batteries.288.voltage")) boat.battV = v.as<float>();
   else if (!strcmp(p, "electrical.batteries.288.current")) boat.battA = v.as<float>();
   else if (!strcmp(p, "electrical.batteries.288.power")) boat.battW = v.as<float>();
+  else if (!strcmp(p, "electrical.batteries.288.capacity.timeRemaining")) boat.battTtg = v.as<float>();
   else if (!strcmp(p, "tanks.fuel.20.currentLevel")) boat.fuel = v.as<float>();
   else if (!strcmp(p, "tanks.freshWater.21.currentLevel")) boat.waterAft = v.as<float>();
   else if (!strcmp(p, "tanks.freshWater.22.currentLevel")) boat.waterStbd = v.as<float>();

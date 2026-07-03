@@ -62,7 +62,7 @@ A little RISC-V micro acting as a "smart" expander. Register map (from the ESPHo
 | 0x02 | Direction | **1 = output**, 0 = input |
 | 0x03 | Output | **1 = high** |
 | 0x04 | Input (read) | |
-| 0x05 | Backlight PWM | single byte 0–255 |
+| 0x05 | Backlight PWM — **INVERTED duty** | low = bright, 255 = OFF, **0 = TRAP** |
 | 0x06 | ADC (read) | |
 | 0x07 | Interrupt status | |
 
@@ -73,7 +73,18 @@ exReg(0x03, 0x3A);   // output: working display/backlight/reset state, buzzer of
 ```
 - `0x3A` (not `0xFF`, not `0x0A`) is the magic output value. All-high (`0xFF`,
   the chip's power-on default) gives a black screen + buzzer screaming.
-- Backlight is on by default after this; we don't need to write 0x05.
+- Backlight is full-on by default (no 0x05 write needed for plain operation).
+- **Backlight dimming (empirical, bltest 2026-07-03):** reg 0x05 duty is INVERTED —
+  reg ~8-40 = full bright, 100 = medium, 200 = dim, **255 = backlight OFF
+  (recoverable — write a lower value to relight)**. **NEVER write reg 0x05 = 0:**
+  it latches the backlight dead until the expander loses power (full unplug).
+  The app maps brightness v(0-255) -> reg = v==0 ? 255 : max(8, 255-v).
+- **Output reg 0x03 bit map (empirical):** bit3 = **LCD RESET** (clearing it at
+  runtime kills the panel until a full ST7701 re-init — never toggle); bit6 =
+  buzzer; bits 0/1/2/4/5/7 showed no visible effect. The backlight is NOT on the
+  output register — only the 0x05 PWM controls it.
+- Diagnostic tool: `pio run -e bltest -t upload` — white screen + beep-counted
+  register experiments (edit `src/bltest/main.cpp` candidates).
 - Do this **before** `gfx->begin()` so the LCD/touch reset lines are released first.
 
 ## Buzzer
