@@ -1181,8 +1181,15 @@ static void onWsText(uint8_t *payload, size_t len) {
 }
 static void wsEvent(WStype_t type, uint8_t *payload, size_t len) {
   switch (type) {
-    case WStype_CONNECTED:    setSk(true);  sendSubscription(); resyncAt = millis() + 2000; break;
-    case WStype_DISCONNECTED: setSk(false); break;
+    case WStype_CONNECTED:
+      setSk(true); sendSubscription(); resyncAt = millis() + 2000;
+      ws.setReconnectInterval(3000);   // server proven reachable: recover fast after drops
+      break;
+    case WStype_DISCONNECTED:
+      setSk(false);
+      // each failed connect attempt can slip the scan-out — realign shortly after
+      if (!resyncAt) resyncAt = millis() + 2000;
+      break;
     case WStype_TEXT:         onWsText(payload, len); break;
     default: break;
   }
@@ -1192,7 +1199,10 @@ static void wsEvent(WStype_t type, uint8_t *payload, size_t len) {
 static void skBegin(const char *h, uint16_t port) {
   strlcpy(skHostRes, h, sizeof(skHostRes)); skPortRes = port;
   ws.begin(skHostRes, skPortRes, SK_PATH);
-  ws.onEvent(wsEvent); ws.setReconnectInterval(3000);
+  // 15s between attempts until the server answers once (an unreachable host —
+  // e.g. gauge at home, no mirror yet — must not hammer/disturb the display);
+  // drops to 3s after the first successful connect (see wsEvent).
+  ws.onEvent(wsEvent); ws.setReconnectInterval(15000);
   skStarted = true;
   Serial.printf("[sk] -> ws://%s:%u%s\n", skHostRes, skPortRes, SK_PATH);
   updateSysInfo();
