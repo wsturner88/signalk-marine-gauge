@@ -1207,11 +1207,13 @@ static void showPortalUI() {
   lv_obj_set_style_text_font(portalStatus, &lv_font_montserrat_20, 0);
   lv_obj_align(portalStatus, LV_ALIGN_BOTTOM_MID, 0, -22);
 }
+static bool portalStaRetry = false;   // true only when entered because WiFi FAILED
 static void enterPortal() {
   if (runMode == RM_PORTAL) return;
   runMode = RM_PORTAL;
   portalStart();
-  if (cfgSsid[0]) WiFi.begin(cfgSsid, cfgPass);   // keep retrying the saved net in background
+  if (portalStaRetry && cfgSsid[0]) WiFi.begin(cfgSsid, cfgPass);  // failure entry: keep retrying behind the AP
+  else WiFi.disconnect();   // deliberate entry: drop STA so we don't insta-exit on "still connected"
   showPortalUI();
   applyBacklight();
   Serial.println("[portal] entered setup mode");
@@ -1303,10 +1305,11 @@ void loop() {
       else if (portalClients() > 0) setTxt(portalStatus, "phone connected - follow the page there");
       else setTxt(portalStatus, "waiting for a phone to join...");
     }
-    // saved WiFi came back while we sat in setup (transient outage) -> resume
-    if (!portalSaved() && WiFi.status() == WL_CONNECTED) exitPortal();
+    // saved WiFi came back while we sat in FAILURE-entered setup -> resume normal
+    if (portalStaRetry && !portalSaved() && WiFi.status() == WL_CONNECTED) exitPortal();
   } else if (!wifiEverUp && cfgSsid[0] && millis() > 45000) {
     // configured but never connected this boot (moved boats? typo?) -> offer setup
+    portalStaRetry = true;
     enterPortal();
   }
   static bool up = false;
