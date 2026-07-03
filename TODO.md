@@ -51,9 +51,12 @@
 - [ ] **Outside temperature source.** Recommended: third RuuviTag (~$40, IP67) paired to
       the Cerbo — CABIN and Freezer sensors are already Ruuvis, so it's plug-and-play;
       map its path when it appears. (`environment.outside.temperature` already subscribed.)
-- [ ] **Forecast feed:** install `@signalk/open-meteo-provider` on openplot (free, no key);
-      gauge polls the v2 REST Weather API hourly → outside temp + forecast line.
-      (Alt: signalk-openweather-plugin streams `environment.forecast.*` deltas, needs key.)
+- [ ] **Forecast feed — DECIDED 2026-07-03:** `signalk-virtual-weather-sensors` on
+      openplot with the **Open-Meteo source (free, keyless)** — 30+ values as plain
+      deltas on standard paths (environment.outside.*/wind.*/weather.*) + severe-weather
+      notifications; flows through the home mirror automatically. Bill installs from the
+      Appstore; then map the real paths onto the weather page (Outside card already
+      subscribed and lights up untouched). Sanity-check its pressure vs the Ruuvi baro.
 - [ ] Baro-fall buzzer alarm (e.g. ≤ −3 mb/3h while anchored).
 - [ ] Persist the 24h pressure history across reboots (periodic NVS/LittleFS save).
 
