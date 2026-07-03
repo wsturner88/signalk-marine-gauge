@@ -109,22 +109,33 @@ exReg(0x03, 0x3A);   // output: working display/backlight/reset state, buzzer of
 ## Connectivity (our app)
 
 - WiFi STA → SignalK WebSocket (`ws://192.168.8.96/signalk/v1/stream`), delta JSON.
-- Heartbeat on serial every 4 s: `[beat] up=.. wifi=.. heap=.. touch=..`
-  (`wifi=3` = connected). Use the DTR capture method to see it.
+- Heartbeat on serial every 4 s: `[beat] up=.. wifi=.. sk=.. heap=.. touch=..`
+  (`wifi=3` = connected, `sk=1` = SignalK WebSocket up). Use the DTR capture method to see it.
 
-## Known OPEN display issues (still being worked)
+## Display issues — RESOLVED 2026-07-03 (keep the fixes!)
 
-1. **Vertical offset (~14–20 lines):** the image is shifted up and the top strip
-   wraps to the bottom — a circular RGB scan-out offset (GDMA starts mid-frame).
-   Mitigation in place: one-shot `esp_lcd_rgb_panel_restart()` ~800 ms after boot.
-   Still seen at times — needs a more robust fix (restart timing, or the deeper
-   WiFi/bounce-buffer contention fix, e.g. pinning WiFi and LVGL to separate cores).
-   To diagnose: note whether it's present immediately at boot vs. appears after a
-   minute of WiFi traffic (boot-offset vs. drift — different fixes).
-2. **Swiping is sluggish on the Wind page:** that page is the heaviest to render
-   (lv_meter + rotating compass + rim arrow), so touch/scroll feels laggy there.
-   A settle-refresh on scroll-end was added; the real fix is likely lightening the
-   wind page's redraw cost (or simplifying the meter).
+1. **Vertical offset / roll (~14–20 lines)** — FIXED, confirmed on-boat. Two causes,
+   one mechanism: the bounce-buffer refill misses its deadline under peak PSRAM
+   traffic (WiFi bursts, heavy redraws) and the scan-out slips circularly.
+   Layered fix in `app/main.cpp`: (a) PCLK lowered 12→10 MHz (`prefer_speed` arg
+   to `Arduino_ESP32RGBPanel`) for ~20% more refill headroom; (b) `fbResync()`
+   (`esp_lcd_rgb_panel_restart`) fired 4x at boot, on every page-change settle,
+   and every 2 min as a safety net. Serial logs `[fb] resync (boot|tile|periodic)`.
+2. **Wind-page swipe sluggish / post-swipe shift** — FIXED, confirmed on-boat.
+   Three stacked fixes:
+   - Page changes are **flick gestures** (LVGL gesture, ~50 px) → instant
+     `gotoTile()`; tileview finger-drag is disabled, so the view can never sit
+     between tiles. NOTE: any full-page object must have `LV_OBJ_FLAG_SCROLLABLE`
+     cleared or it claims the drag and the flick dies (this is why the wind page
+     alone wouldn't flick — the meter kept the default flag).
+   - Data-driven repaints pause while a finger is down (`touchDown`) so heavy
+     redraws can't starve touch sampling mid-flick.
+   - The wind dial's static content (ticks, arcs, degree labels, boat, captions)
+     is **pre-rendered once at boot** into a PSRAM image via `lv_snapshot`
+     (`LV_USE_SNAPSHOT 1` in `include/lv_conf.h`) — the live `lv_meter` is
+     deleted after the snapshot. The rim arrow is a small ~55x55 object, and
+     labels/compass only repaint on real changes. Steady-state render cost
+     dropped ~100x. Boot serial logs `[wind] dial snapshot ok (460x460, ...)`.
 
 ## Quick recovery checklist if the screen is black
 1. Did you **power-cycle** after the last flash? Do that first.

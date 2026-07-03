@@ -120,7 +120,7 @@ static bool dataDirty = false;
 static lv_obj_t *tiles[NTILES], *pageDots, *tileView;
 static int curTile = 0;
 // wind
-static lv_obj_t *windMeter, *windArrow, *windSpeedLbl, *windAngleLbl, *stwLbl, *twsLbl;
+static lv_obj_t *windDial, *windArrow, *windSpeedLbl, *windAngleLbl, *stwLbl, *twsLbl;
 static lv_obj_t *cardinals[8];
 static lv_point_t arrowPts[4];
 static const int  cardBearing[8] = {0, 45, 90, 135, 180, 225, 270, 315};
@@ -213,49 +213,80 @@ static lv_obj_t *dimLbl(lv_obj_t *parent, const char *txt, const lv_font_t *f, l
 }
 
 // ---- page 0: wind ----
+// The dial background (ticks, degree labels, port/stbd arcs, boat image, bow
+// mark, unit captions) never changes at runtime, so it is rendered ONCE at
+// boot — a throwaway lv_meter snapshotted into a PSRAM image — and shown as a
+// plain lv_img. Repainting dial pixels is then a blit. The old live lv_meter
+// re-ran all its tick/arc/label drawing on every wind update, because the
+// full-dial 460x460 windArrow line invalidated the whole page ~7x/sec.
+static lv_img_dsc_t windDialImg;
 static void buildWind(lv_obj_t *tile) {
   lv_obj_set_style_bg_color(tile, lv_color_hex(C_BG), 0);
-  windMeter = lv_meter_create(tile);
-  lv_obj_set_size(windMeter, 460, 460);
-  lv_obj_center(windMeter);
-  lv_obj_set_style_bg_color(windMeter, lv_color_hex(0x0A1018), 0);
-  lv_obj_set_style_border_width(windMeter, 0, 0);
-  // The card() pages clear this; the meter must too. Its compass labels overhang
-  // the edge, so LVGL treats it as scrollable — a drag on it then gets claimed as
-  // a scroll and never becomes the page-flick gesture.
-  lv_obj_clear_flag(windMeter, LV_OBJ_FLAG_SCROLLABLE);
-  lv_meter_scale_t *sc = lv_meter_add_scale(windMeter);
-  lv_meter_set_scale_range(windMeter, sc, 0, 360, 360, 270);
-  lv_meter_set_scale_ticks(windMeter, sc, 73, 1, 7, lv_color_hex(0x263038));
-  lv_meter_set_scale_major_ticks(windMeter, sc, 18, 2, 13, lv_color_hex(0x52606D), 4);
-  lv_meter_indicator_t *stbd = lv_meter_add_arc(windMeter, sc, 7, lv_color_hex(C_GREEN), 0);
-  lv_meter_set_indicator_start_value(windMeter, stbd, 0);
-  lv_meter_set_indicator_end_value(windMeter, stbd, 180);
-  lv_meter_indicator_t *port = lv_meter_add_arc(windMeter, sc, 7, lv_color_hex(C_RED), 0);
-  lv_meter_set_indicator_start_value(windMeter, port, 180);
-  lv_meter_set_indicator_end_value(windMeter, port, 360);
 
+  // throwaway meter carrying all the STATIC content, exactly as the old live one
+  lv_obj_t *m = lv_meter_create(tile);
+  lv_obj_set_size(m, 460, 460);
+  lv_obj_center(m);
+  lv_obj_set_style_bg_color(m, lv_color_hex(0x0A1018), 0);
+  lv_obj_set_style_border_width(m, 0, 0);
+  lv_meter_scale_t *sc = lv_meter_add_scale(m);
+  lv_meter_set_scale_range(m, sc, 0, 360, 360, 270);
+  lv_meter_set_scale_ticks(m, sc, 73, 1, 7, lv_color_hex(0x263038));
+  lv_meter_set_scale_major_ticks(m, sc, 18, 2, 13, lv_color_hex(0x52606D), 4);
+  lv_meter_indicator_t *stbd = lv_meter_add_arc(m, sc, 7, lv_color_hex(C_GREEN), 0);
+  lv_meter_set_indicator_start_value(m, stbd, 0);
+  lv_meter_set_indicator_end_value(m, stbd, 180);
+  lv_meter_indicator_t *port = lv_meter_add_arc(m, sc, 7, lv_color_hex(C_RED), 0);
+  lv_meter_set_indicator_start_value(m, port, 180);
+  lv_meter_set_indicator_end_value(m, port, 360);
   // smooth boat bow image, large, upper-center (recolored accent)
-  lv_obj_t *boat = lv_img_create(windMeter);
+  lv_obj_t *boat = lv_img_create(m);
   lv_img_set_src(boat, &boat_img);
   lv_obj_set_style_img_recolor(boat, lv_color_hex(C_ACCENT), 0);
   lv_obj_set_style_img_recolor_opa(boat, LV_OPA_COVER, 0);
   lv_obj_align(boat, LV_ALIGN_CENTER, 0, -56);
+  lv_obj_t *bow = lv_label_create(m);
+  lv_label_set_text(bow, LV_SYMBOL_UP);
+  lv_obj_set_style_text_color(bow, lv_color_hex(C_ACCENT), 0);
+  lv_obj_align(bow, LV_ALIGN_TOP_MID, 0, 6);
+  dimLbl(m, "kts AWS", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 160);
+  dimLbl(m, "kn STW", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, 6, 38);
+  dimLbl(m, "kn TWS", &lv_font_montserrat_14, LV_ALIGN_TOP_RIGHT, -6, 38);
+  dimLbl(m, "GUST 5m", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_LEFT, 6, -36);
+  dimLbl(m, "GUST 1h", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_RIGHT, -6, -36);
 
-  // wind arrow that clocks around the rim (set in updateUI)
-  windArrow = lv_line_create(windMeter);
-  lv_obj_set_size(windArrow, 460, 460); lv_obj_set_pos(windArrow, 0, 0);
+  // render once into PSRAM, then swap the live meter for a plain image
+  lv_obj_update_layout(m);
+  uint32_t sz = lv_snapshot_buf_size_needed(m, LV_IMG_CF_TRUE_COLOR_ALPHA);
+  void *buf = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+  lv_res_t sr = buf ? lv_snapshot_take_to_buf(m, LV_IMG_CF_TRUE_COLOR_ALPHA, &windDialImg, buf, sz)
+                    : LV_RES_INV;
+  Serial.printf("[wind] dial snapshot %s (%ux%u, %u bytes)\n", sr == LV_RES_OK ? "ok" : "FAILED",
+                sr == LV_RES_OK ? windDialImg.header.w : 0, sr == LV_RES_OK ? windDialImg.header.h : 0, sz);
+  lv_obj_t *dial;
+  if (sr == LV_RES_OK) {
+    lv_obj_del(m);
+    windDial = lv_img_create(tile);
+    lv_img_set_src(windDial, &windDialImg);
+    lv_obj_center(windDial);
+    dial = windDial;
+  } else {
+    dial = m;  // fall back to the live meter — page still works, just heavier
+  }
+  // Must not claim the page-flick: the compass labels overhang the edge, which
+  // would otherwise make this object scrollable and eat the drag as a scroll.
+  lv_obj_clear_flag(dial, LV_OBJ_FLAG_SCROLLABLE);
+
+  // dynamic content over the pre-rendered dial
+  // wind arrow that clocks around the rim — a SMALL object moved along the rim
+  // (points set in updateUI), so each move invalidates ~55x55 px, not the dial
+  windArrow = lv_line_create(dial);
   lv_obj_set_style_line_width(windArrow, 5, 0);
   lv_obj_set_style_line_color(windArrow, lv_color_hex(C_ACCENT), 0);
   lv_obj_set_style_line_rounded(windArrow, true, 0);
 
-  lv_obj_t *bow = lv_label_create(windMeter);
-  lv_label_set_text(bow, LV_SYMBOL_UP);
-  lv_obj_set_style_text_color(bow, lv_color_hex(C_ACCENT), 0);
-  lv_obj_align(bow, LV_ALIGN_TOP_MID, 0, 6);
-
   for (int i = 0; i < 8; i++) {
-    cardinals[i] = lv_label_create(windMeter);
+    cardinals[i] = lv_label_create(dial);
     lv_label_set_text(cardinals[i], cardName[i]);
     bool major = (i % 2 == 0);
     lv_obj_set_style_text_color(cardinals[i], lv_color_hex(major ? C_TEXT : C_DIM), 0);
@@ -263,22 +294,15 @@ static void buildWind(lv_obj_t *tile) {
     lv_obj_align(cardinals[i], LV_ALIGN_CENTER, 0, -COMPASS_R);
   }
   // AWA + big AWS in the lower-center, below the boat (no overlap)
-  windAngleLbl = centerNum(windMeter, &lv_font_montserrat_22, LV_ALIGN_CENTER, 0, 50);
+  windAngleLbl = centerNum(dial, &lv_font_montserrat_22, LV_ALIGN_CENTER, 0, 50);
   lv_obj_set_style_text_color(windAngleLbl, lv_color_hex(C_ACCENT), 0);
-  windSpeedLbl = centerNum(windMeter, &montserrat_80, LV_ALIGN_CENTER, 0, 108);
-  dimLbl(windMeter, "kts AWS", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 160);
-
-  stwLbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, 6, 6);
-  dimLbl(windMeter, "kn STW", &lv_font_montserrat_14, LV_ALIGN_TOP_LEFT, 6, 38);
-  twsLbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_TOP_RIGHT, -6, 6);
-  dimLbl(windMeter, "kn TWS", &lv_font_montserrat_14, LV_ALIGN_TOP_RIGHT, -6, 38);
-
+  windSpeedLbl = centerNum(dial, &montserrat_80, LV_ALIGN_CENTER, 0, 108);
+  stwLbl = centerNum(dial, &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, 6, 6);
+  twsLbl = centerNum(dial, &lv_font_montserrat_28, LV_ALIGN_TOP_RIGHT, -6, 6);
   // true-wind gusts in the bottom corners (knots), 5-min (left) / 1-hr (right)
-  dimLbl(windMeter, "GUST 5m", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_LEFT, 6, -36);
-  gust5Lbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_LEFT, 6, -6);
+  gust5Lbl = centerNum(dial, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_LEFT, 6, -6);
   lv_obj_set_style_text_color(gust5Lbl, lv_color_hex(C_YELLOW), 0);
-  dimLbl(windMeter, "GUST 1h", &lv_font_montserrat_14, LV_ALIGN_BOTTOM_RIGHT, -6, -36);
-  gust1hLbl = centerNum(windMeter, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
+  gust1hLbl = centerNum(dial, &lv_font_montserrat_28, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
   lv_obj_set_style_text_color(gust1hLbl, lv_color_hex(C_YELLOW), 0);
 }
 
@@ -546,44 +570,67 @@ static void setTank(lv_obj_t *bar, lv_obj_t *lbl, float ratio) {
   lv_obj_set_style_bg_color(bar, lv_color_hex(pct < 15 ? C_RED : (pct < 30 ? C_YELLOW : C_ACCENT)), LV_PART_INDICATOR);
 }
 
+// set a label only when the text actually changed — lv_label_set_text always
+// invalidates (and redraws), even for identical text
+static void setTxt(lv_obj_t *l, const char *s) {
+  if (strcmp(lv_label_get_text(l), s)) lv_label_set_text(l, s);
+}
 static void updateUI() {
   char b[40];
   // --- wind (page 0): rim arrow uses ~1s-smoothed angle ---
   if (!isnan(boat.windAngleAppAvg)) {
     float deg = boat.windAngleAppAvg * 57.2958f;
     while (deg < 0) deg += 360; while (deg >= 360) deg -= 360;
-    float th = deg * 0.0174533f;
-    float dx = sinf(th), dy = -cosf(th), px = cosf(th), py = sinf(th);
-    const float Ri = 198, Ro = 220, w = 12;  // outer rim, clear of compass labels
-    arrowPts[0] = {(lv_coord_t)(MC + Ri * dx),            (lv_coord_t)(MC + Ri * dy)};            // inner tip
-    arrowPts[1] = {(lv_coord_t)(MC + Ro * dx + w * px),   (lv_coord_t)(MC + Ro * dy + w * py)};   // base1
-    arrowPts[2] = {(lv_coord_t)(MC + Ro * dx - w * px),   (lv_coord_t)(MC + Ro * dy - w * py)};   // base2
-    arrowPts[3] = arrowPts[0];
-    lv_line_set_points(windArrow, arrowPts, 4);
-    int d = (int)(deg + 0.5f);
-    bool stbd = (d > 0 && d < 180);
-    lv_obj_set_style_line_color(windArrow, lv_color_hex(d == 0 || d == 180 ? C_ACCENT : (stbd ? C_GREEN : C_RED)), 0);
-    const char *side = (d == 0 || d == 180) ? "" : (stbd ? " STBD" : " PORT");
-    snprintf(b, sizeof(b), "%d\xC2\xB0%s", d <= 180 ? d : 360 - d, side);
-    lv_label_set_text(windAngleLbl, b);
+    int d = (int)(deg + 0.5f); if (d == 360) d = 0;
+    static int lastD = -1;
+    if (d != lastD) {              // move only on whole-degree changes
+      lastD = d;
+      float th = d * 0.0174533f;
+      float dx = sinf(th), dy = -cosf(th), px = cosf(th), py = sinf(th);
+      const float Ri = 198, Ro = 220, w = 12;  // outer rim, clear of compass labels
+      float X[3] = {MC + Ri * dx, MC + Ro * dx + w * px, MC + Ro * dx - w * px};   // tip, base1, base2
+      float Y[3] = {MC + Ri * dy, MC + Ro * dy + w * py, MC + Ro * dy - w * py};
+      // wrap the small line object tightly around the points (dial coords -> local)
+      lv_coord_t x0 = (lv_coord_t)floorf(fminf(X[0], fminf(X[1], X[2]))) - 4;
+      lv_coord_t y0 = (lv_coord_t)floorf(fminf(Y[0], fminf(Y[1], Y[2]))) - 4;
+      lv_coord_t x1 = (lv_coord_t)ceilf(fmaxf(X[0], fmaxf(X[1], X[2]))) + 4;
+      lv_coord_t y1 = (lv_coord_t)ceilf(fmaxf(Y[0], fmaxf(Y[1], Y[2]))) + 4;
+      for (int i = 0; i < 3; i++) arrowPts[i] = {(lv_coord_t)(X[i] - x0), (lv_coord_t)(Y[i] - y0)};
+      arrowPts[3] = arrowPts[0];
+      lv_obj_set_pos(windArrow, x0, y0);
+      lv_obj_set_size(windArrow, x1 - x0, y1 - y0);
+      lv_line_set_points(windArrow, arrowPts, 4);
+      bool stbd = (d > 0 && d < 180);
+      lv_obj_set_style_line_color(windArrow, lv_color_hex(d == 0 || d == 180 ? C_ACCENT : (stbd ? C_GREEN : C_RED)), 0);
+      const char *side = (d == 0 || d == 180) ? "" : (stbd ? " STBD" : " PORT");
+      snprintf(b, sizeof(b), "%d\xC2\xB0%s", d <= 180 ? d : 360 - d, side);
+      setTxt(windAngleLbl, b);
+    }
   }
-  if (!isnan(boat.windSpeedApp))  { snprintf(b, sizeof(b), "%.1f", boat.windSpeedApp * 1.94384f);  lv_label_set_text(windSpeedLbl, b); }
-  if (!isnan(boat.stw))           { snprintf(b, sizeof(b), "%.1f", boat.stw * 1.94384f);           lv_label_set_text(stwLbl, b); lv_label_set_text(sdSpeed, b); }
-  if (!isnan(boat.windSpeedTrue)) { snprintf(b, sizeof(b), "%.1f", boat.windSpeedTrue * 1.94384f); lv_label_set_text(twsLbl, b); }
-  // --- gusts (system page corners) ---
-  if (!isnan(boat.gust5m)) { snprintf(b, sizeof(b), "%.0f", boat.gust5m * 1.94384f); lv_label_set_text(gust5Lbl, b); }
-  if (!isnan(boat.gust1h)) { snprintf(b, sizeof(b), "%.0f", boat.gust1h * 1.94384f); lv_label_set_text(gust1hLbl, b); }
+  if (!isnan(boat.windSpeedApp))  { snprintf(b, sizeof(b), "%.1f", boat.windSpeedApp * 1.94384f);  setTxt(windSpeedLbl, b); }
+  if (!isnan(boat.stw))           { snprintf(b, sizeof(b), "%.1f", boat.stw * 1.94384f);           setTxt(stwLbl, b); setTxt(sdSpeed, b); }
+  if (!isnan(boat.windSpeedTrue)) { snprintf(b, sizeof(b), "%.1f", boat.windSpeedTrue * 1.94384f); setTxt(twsLbl, b); }
+  // --- gusts (wind page bottom corners) ---
+  if (!isnan(boat.gust5m)) { snprintf(b, sizeof(b), "%.0f", boat.gust5m * 1.94384f); setTxt(gust5Lbl, b); }
+  if (!isnan(boat.gust1h)) { snprintf(b, sizeof(b), "%.0f", boat.gust1h * 1.94384f); setTxt(gust1hLbl, b); }
   {
     float hd = isnan(boat.heading) ? 0 : boat.heading * 57.2958f;
-    for (int i = 0; i < 8; i++) {
-      float th = (cardBearing[i] - hd) * 0.0174533f;
-      lv_obj_align(cardinals[i], LV_ALIGN_CENTER, (int)(COMPASS_R * sinf(th) + 0.5f), (int)(-COMPASS_R * cosf(th) + 0.5f));
+    static int lastHdg = -1000;
+    int hi = (int)(hd + 0.5f);
+    if (hi != lastHdg) {           // realign the compass ring only when the heading moved
+      lastHdg = hi;
+      for (int i = 0; i < 8; i++) {
+        float th = (cardBearing[i] - hd) * 0.0174533f;
+        lv_obj_align(cardinals[i], LV_ALIGN_CENTER, (int)(COMPASS_R * sinf(th) + 0.5f), (int)(-COMPASS_R * cosf(th) + 0.5f));
+      }
     }
   }
   // --- speed/depth (page 1) ---
   if (!isnan(boat.depth)) {
-    snprintf(b, sizeof(b), "%.1f", boat.depth * 3.28084f); lv_label_set_text(sdDepth, b);
-    lv_obj_set_style_text_color(sdDepth, lv_color_hex(boat.depth < 1.5f ? C_RED : (boat.depth < 3.0f ? C_YELLOW : C_TEXT)), 0);
+    snprintf(b, sizeof(b), "%.1f", boat.depth * 3.28084f); setTxt(sdDepth, b);
+    uint32_t col = boat.depth < 1.5f ? C_RED : (boat.depth < 3.0f ? C_YELLOW : C_TEXT);
+    static uint32_t lastCol = 0;
+    if (col != lastCol) { lastCol = col; lv_obj_set_style_text_color(sdDepth, lv_color_hex(col), 0); }
   }
   // --- status cards (page 2) ---
   if (!isnan(boat.battSoc)) {
