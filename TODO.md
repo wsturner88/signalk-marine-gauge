@@ -11,7 +11,10 @@
       setup page with join-my-AP QR code; SignalK auto-discovery via mDNS (`_signalk-http`);
       config in NVS, secrets.h now only a dev seed. Entry: no config / SETUP button on
       System page (two-tap) / finger held at power-on / WiFi never up 45 s after boot.
-      Still open: field-test on a phone, and `secrets.h.example` before repo goes public.
+      **Field-tested end-to-end 2026-07-03** (factory-fresh wipe -> QR -> portal -> mDNS
+      found OpenPlot -> live data): "worked perfectly." secrets seed now opt-in
+      (SEED_FROM_SECRETS). Still open: `secrets.h.example` + a bad-password message on
+      the setup screen before repo goes public.
 - [ ] **On-device settings page.** Web UI at the gauge's IP once on the network:
       SignalK host/port, units (ft/m, °F/°C, kn), brightness, alarm thresholds.
       Persist to NVS (`Preferences`). Same web stack as the captive portal.
