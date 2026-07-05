@@ -14,17 +14,20 @@ part in `export/`. All dimensions derived from Waveshare's official board STEP
 ![pod exploded](pod_exploded.png)
 
 - One-piece rounded body; board drops in from the rear, bezel lip retains the
-  glass. Back plate screws into internal gussets with 4× M3×10 self-tappers
-  (heads counterbored so the back stays flat).
+  glass. Back plate screws into four wall-face bosses with 4× **M3×8**
+  self-tappers (heads counterbored so the back stays flat). The bosses have
+  45° conical lead-ins fused to the walls — no floating first layers, so the
+  body genuinely prints face-down with **zero supports** (the earlier corner
+  gussets, which had a mid-air first layer, were removed in v2).
 - **Mounting**: flat back with a large tape zone — use 3M VHB (e.g. 4910/5952),
   four ~20 mm squares near the corners, avoiding the two keyhole slots. The
   keyholes (Ø8 head pass, 4 mm slots, 40 mm apart) are a screw-hang alternative.
 - **Cable**: USB-C exits the left wall through a rear-open notch flush with the
   wall — a **right-angle USB-C cable** sits tidiest. Route it in before
   screwing the back on.
-- **Vents**: 3 slots each on top + bottom walls near the back edge (convection
-  + lets the alarm buzzer be heard). `TERMINAL_NOTCH = True` in the script adds
-  the 12 V terminal-plug opening if the pod ever runs on boat power.
+- **Vents**: 3 slots on the bottom wall + 2 on the top wall near the back edge
+  (convection + lets the alarm buzzer be heard). `TERMINAL_NOTCH = True` in the
+  script adds the 12 V terminal-plug opening if the pod ever runs on boat power.
 - Four 7×7 pillars on the back plate land 0.3 mm shy of the board's corner
   standoffs — add thin foam pads there to preload the board.
 - Prints: body face-down, back exterior-down; no supports for either.

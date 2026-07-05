@@ -9,7 +9,9 @@ Two printed parts:
   A. pod_body  - one-piece rounded box: front bezel lip retains the glass, board drops
                  in from the rear. USB-C cable notch on the left wall (rear-open);
                  vent slots on top+bottom walls near the back edge (airflow + buzzer).
-  B. pod_back  - flat back plate, screws into internal corner gussets. Smooth exterior
+                 Back-plate screws go into 4 wall-face bosses with 45-degree conical
+                 lead-ins — no floating geometry, prints face-down with zero supports.
+  B. pod_back  - flat back plate, screws into the wall bosses. Smooth exterior
                  for VHB tape, 2 keyhole slots, 4 pillars preload the board standoffs.
 
 Board dimensions from Waveshare's official STEP (see gauge_housing.py / README).
@@ -20,7 +22,7 @@ Requires: python3.12, `pip install build123d`.  Run: python pod_housing.py
 """
 
 from build123d import (
-    Box, Compound, Cylinder, Location, Polygon, Pos, RectangleRounded,
+    Box, Compound, Cone, Cylinder, Location, Pos, RectangleRounded,
     export_step, export_stl, extrude, loft,
 )
 import os
@@ -48,8 +50,17 @@ TERM_X = (-22.35, 23.65)
 TERM_Z_TOP = -6.5
 BUZZER_XY = (-24.45, 12.9)
 
-GUSSET_LEG = 10.0
-LID_HOLE_XY = 39.9      # back-plate screws / gusset pilot bores
+# back-plate screw bosses on the inner wall faces. Each is a vertical cylinder
+# (r 3.5, embedded in the 3.6 wall so nothing bulges outside) with a 45-degree
+# conical lead-in, so it prints face-down with NO floating first layer — every
+# layer is fused to the wall. Positions dodge the USB notch, vents, side buttons,
+# board standoffs and the big inductor.
+#   (axis, wall sign, position along the wall)
+BOSS_WALLS = [("x", 1, 0.0), ("x", -1, -5.0), ("y", 1, -33.0), ("y", -1, 0.0)]
+BOSS_R = 3.5
+BOSS_LEAD_TOP = -12.5   # lead-in tip (just behind module insertion depth -11.9)
+BOSS_FULL_Z = -16.0     # full radius from here down to BACK_SEAT
+BORE_OFF = 40.4         # pilot bore axis, 2.0 mm inboard of the wall face
 PILOT_D = 2.5           # M3 self-tapping pilot
 
 PLATE_W = 84.4
@@ -64,9 +75,14 @@ def cutbox(x0, x1, y0, y1, z0, z1):
     return Pos((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2) * Box(x1 - x0, y1 - y0, z1 - z0)
 
 
-def corner_triangle(sx, sy, leg):
-    cx, cy = sx * WALL_INNER, sy * WALL_INNER
-    return Polygon(*[(cx, cy), (cx - sx * leg, cy), (cx, cy - sy * leg)], align=None)
+def boss_center(axis, sign, off):
+    """(x, y) of a boss cylinder center, sitting on the inner wall face."""
+    return (sign * WALL_INNER, off) if axis == "x" else (off, sign * WALL_INNER)
+
+
+def bore_center(axis, sign, off):
+    """(x, y) of the pilot bore / plate hole, 2 mm inboard of the wall face."""
+    return (sign * BORE_OFF, off) if axis == "x" else (off, sign * BORE_OFF)
 
 
 # =============================================================== A. pod body
@@ -82,14 +98,17 @@ body -= cutbox(-CAVITY_W / 2, CAVITY_W / 2, -CAVITY_W / 2, CAVITY_W / 2,
 body -= loft([Pos(0, 0, 0.01) * RectangleRounded(83.5, 83.5, 4.0),
               Pos(0, 0, -1.3) * RectangleRounded(OPEN_W, OPEN_W, 3.0)])
 
-# internal corner gussets (45-degree tapered starts -> no supports face-down)
-for sx in (-1, 1):
-    for sy in (-1, 1):
-        body += loft([Pos(0, 0, -12.0) * corner_triangle(sx, sy, 2.0),
-                      Pos(0, 0, -20.0) * corner_triangle(sx, sy, GUSSET_LEG)])
-        body += extrude(corner_triangle(sx, sy, GUSSET_LEG), amount=-4.0) \
-            .moved(Location((0, 0, -20.0)))
-        body -= Pos(sx * LID_HOLE_XY, sy * LID_HOLE_XY, -19.0) * Cylinder(PILOT_D / 2, 10.0)
+# back-plate screw bosses on the wall faces (conical lead-in -> support-free)
+for axis, sign, off in BOSS_WALLS:
+    bcx, bcy = boss_center(axis, sign, off)
+    lead_h = BOSS_LEAD_TOP - BOSS_FULL_Z
+    body += Pos(bcx, bcy, (BOSS_LEAD_TOP + BOSS_FULL_Z) / 2) * \
+        Cone(bottom_radius=BOSS_R, top_radius=0.6, height=lead_h)
+    body += Pos(bcx, bcy, (BOSS_FULL_Z + BACK_SEAT) / 2) * \
+        Cylinder(BOSS_R, BOSS_FULL_Z - BACK_SEAT)
+    px, py = bore_center(axis, sign, off)
+    body -= Pos(px, py, (BACK_SEAT + BOSS_FULL_Z) / 2) * \
+        Cylinder(PILOT_D / 2, BOSS_FULL_Z - BACK_SEAT)
 
 # USB-C cable notch, left wall, open to the rear edge (right-angle cable sits flush)
 body -= cutbox(-WALL_OUTER - 1, -WALL_INNER + 0.6, USB_Y[0], USB_Y[1],
@@ -99,19 +118,22 @@ if TERMINAL_NOTCH:  # optional 12V terminal-plug notch, bottom wall
     body -= cutbox(TERM_X[0], TERM_X[1], WALL_INNER - 0.6, WALL_OUTER + 1,
                    -BODY_D - 1, TERM_Z_TOP)
 
-# vent slots on top and bottom walls, tucked near the back edge (also buzzer outlet)
-for y0, y1 in [(WALL_INNER - 0.6, WALL_OUTER + 1), (-WALL_OUTER - 1, -WALL_INNER + 0.6)]:
-    for cx in (-20.0, 0.0, 20.0):
+# vent slots on top and bottom walls, tucked near the back edge (also buzzer outlet).
+# slot positions leave room for the Y-wall screw bosses.
+VENTS = [((WALL_INNER - 0.6, WALL_OUTER + 1), (-20.0, 0.0, 20.0)),      # bottom (boss at x=-33)
+         ((-WALL_OUTER - 1, -WALL_INNER + 0.6), (-26.0, 26.0))]         # top (boss at x=0)
+for (y0, y1), centers in VENTS:
+    for cx in centers:
         body -= cutbox(cx - 7, cx + 7, y0, y1, -25.0, -21.0)
 
 # =============================================================== B. back plate
 # modeled exterior-face-down (z=0 is the wall/tape face) for a smooth first layer
 plate = extrude(RectangleRounded(PLATE_W, PLATE_W, 2.0), amount=BACK_T)
 
-for sx in (-1, 1):  # gusset screw holes + head counterbores on the wall face
-    for sy in (-1, 1):
-        plate -= Pos(sx * LID_HOLE_XY, sy * LID_HOLE_XY, BACK_T / 2) * Cylinder(3.4 / 2, BACK_T + 2)
-        plate -= Pos(sx * LID_HOLE_XY, sy * LID_HOLE_XY, 1.1) * Cylinder(6.2 / 2, 2.2)
+for axis, sign, off in BOSS_WALLS:  # screw holes + head counterbores at the boss bores
+    px, py = bore_center(axis, sign, off)
+    plate -= Pos(px, py, BACK_T / 2) * Cylinder(3.4 / 2, BACK_T + 2)
+    plate -= Pos(px, py, 1.1) * Cylinder(6.0 / 2, 2.2)
 
 for kx in (-KEYHOLE_X, KEYHOLE_X):  # keyhole slots (screw-hang alternative to tape)
     plate -= Pos(kx, 5.0, BACK_T / 2) * Cylinder(8.0 / 2, BACK_T + 2)      # head pass-through
