@@ -1,0 +1,23 @@
+# SignalK mirror — run at home or work to feed local gauges with
+# live boat data over Tailscale. The boat's server stays the source
+# of truth; this container connects to it upstream and re-serves everything on
+# the local LAN, where a gauge auto-discovers it via mDNS.
+#
+#   docker compose up -d          # then open http://<host>:3000 to finish setup
+#
+# See README.md in this folder for the upstream-connection + throttling steps
+# (IMPORTANT: an unthrottled mirror can eat 15-25 GB/month of boat Starlink data;
+# throttled it's ~2-3 GB).
+services:
+  signalk:
+    image: signalk/signalk-server:latest
+    container_name: signalk-mirror
+    restart: unless-stopped
+    # host networking is REQUIRED for two things:
+    #  - mDNS advertisement must reach the real LAN (gauges auto-discover)
+    #  - the container reaches Tailscale IPs through the host's tailnet
+    network_mode: host
+    volumes:
+      - ./signalk-config:/home/node/.signalk
+    environment:
+      - TZ=America/Detroit

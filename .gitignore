@@ -1,0 +1,18 @@
+# Secrets — never commit WiFi creds / server addresses
+**/secrets.h
+
+# PlatformIO build output
+firmware/.pio/
+
+# Vendored Waveshare demo (large; re-clone from upstream if needed)
+vendor/
+
+# macOS
+.DS_Store
+
+# Local Claude Code settings (machine-specific permissions etc.)
+.claude/settings.local.json
+__pycache__/
+
+# Maintainer-private operational notes (boat/network specifics)
+BOAT_NOTES.private.md
