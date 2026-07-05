@@ -83,6 +83,25 @@
       race timer (`signalk-racer`).
 - [ ] Sanity-clamp rules for bogus data (water temp reads 393 K / 120°C — never display).
 
+## 💰 Productization (selling gauge + 3D-printed pod — ideas 2026-07-05)
+
+- **Tier 1 buyer (gauge only): boats that already run SignalK.** OpenPlotter crowd +
+  every Victron boat — **Venus OS "Large" runs SignalK natively on a Cerbo GX** (firmware
+  image toggle, no Pi). Listing requirement: "needs a SignalK server." Zero-config
+  onboarding is the differentiator: unbox → QR → boat data.
+- **Tier 2 SKU later: "boat brain" bundle** — Pi + preloaded SignalK image + NMEA
+  interface (N2K: PICAN-M hat ~$80, powers the Pi from the backbone; 0183: isolated
+  serial). Support-heavy; only after tier 1 proves out.
+- **Lite-mode wildcard:** the board has a CAN port — ESP32 NMEA2000 library could read
+  N2K directly, no server at all (the original FrancisSailor inspiration). Keep
+  SignalK flagship; standalone N2K as a someday bullet.
+- **Ladder:** repo public + web flasher → assembled units on Tindie ($120-180, gauge +
+  pod) → starter kit. Check FCC/CE posture for small-batch sales (ESP32 module itself
+  is certified).
+- [ ] **Portal: multi-server pick.** Gauge marries the FIRST mDNS answer; a boat with
+  two servers (e.g. openplot + Cerbo running Venus Large) needs a chooser on the
+  setup page.
+
 ## 🧰 Housekeeping / boat-side
 
 - [ ] Fix SignalK depth offsets on openplot (belowSurface/belowKeel inconsistent with draft).
