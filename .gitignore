@@ -12,3 +12,4 @@ vendor/
 
 # Local Claude Code settings (machine-specific permissions etc.)
 .claude/settings.local.json
+__pycache__/

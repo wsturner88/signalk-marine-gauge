@@ -660,7 +660,7 @@
 #define LV_USE_GIF 0
 
 /*QR code library*/
-#define LV_USE_QRCODE 0
+#define LV_USE_QRCODE 1  /*onboarding portal: join-my-AP QR on screen*/
 
 /*FreeType library*/
 #define LV_USE_FREETYPE 0
@@ -702,7 +702,7 @@
  *----------*/
 
 /*1: Enable API to take snapshot for object*/
-#define LV_USE_SNAPSHOT 0
+#define LV_USE_SNAPSHOT 1  /*one-time render of the static wind dial into a PSRAM image*/
 
 /*1: Enable Monkey test*/
 #define LV_USE_MONKEY 0
