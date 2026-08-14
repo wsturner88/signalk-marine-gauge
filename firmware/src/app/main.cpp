@@ -65,6 +65,10 @@ LV_IMG_DECLARE(boat_img);
 #define C_RED    0xEF5350
 
 // ---------------- Display ----------------
+// 1 = mount the gauge upside-down (USB-C exiting the top): panel scan is
+// rotated 180 in the flush copy (Arduino_GFX rotation 2) and touch is
+// mirrored to match. 0 = normal orientation.
+#define DISPLAY_ROTATE_180 1
 Arduino_DataBus *bus = new Arduino_SWSPI(GFX_NOT_DEFINED, 42, 2, 1, GFX_NOT_DEFINED);
 // prefer_speed 10MHz (default with OPI PSRAM is 12MHz): each bounce-buffer refill
 // gets ~20% more deadline, so scan-out slips (the rolled/shifted image) under
@@ -74,7 +78,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   1, 10, 8, 50, 1, 10, 8, 20,
   0 /*pclk_active_neg*/, 10000000L /*prefer_speed*/);
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
-  480, 480, rgbpanel, 0, true, bus, GFX_NOT_DEFINED,
+  480, 480, rgbpanel, DISPLAY_ROTATE_180 ? 2 : 0, true, bus, GFX_NOT_DEFINED,
   st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
 
 static uint32_t W, H;
@@ -106,7 +110,12 @@ static int16_t tpx[5], tpy[5];
 static bool touchDown = false;  // gates data-driven redraws during a flick
 static void touch_read(lv_indev_drv_t *, lv_indev_data_t *data) {
   if (touchOK && touch.getPoint(tpx, tpy, 1) > 0) {
-    data->state = LV_INDEV_STATE_PR; data->point.x = tpx[0]; data->point.y = tpy[0];
+    data->state = LV_INDEV_STATE_PR;
+#if DISPLAY_ROTATE_180
+    data->point.x = (W - 1) - tpx[0]; data->point.y = (H - 1) - tpy[0];
+#else
+    data->point.x = tpx[0]; data->point.y = tpy[0];
+#endif
   } else data->state = LV_INDEV_STATE_REL;
   touchDown = (data->state == LV_INDEV_STATE_PR);
 }
